@@ -1,4 +1,4 @@
-﻿# app/streamlit_app/app.py
+﻿# app/streamlit_app/streamlit_entry.py
 from __future__ import annotations
 import streamlit as st
 

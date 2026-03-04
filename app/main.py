@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from app.routers.demon_health import router as demon_health_router
 
 # -------------------------------------------------
 # .env 로드 우선순위:
@@ -74,7 +75,7 @@ def _parse_cors_origins() -> list[str]:
         if items:
             return items
 
-    # ✅ 기본값(사내/로컬 운영)
+    # ✅ 기본값(로컬 운영)
     return [
         "http://localhost:8501",
         "http://127.0.0.1:8501",
@@ -89,6 +90,11 @@ async def lifespan(app: FastAPI):
     print("[BOOT] ADMIN_PASS set?:", bool(os.getenv("ADMIN_PASS")), flush=True)
     print("[BOOT] PG_WORK_MEM:", os.getenv("PG_WORK_MEM", "<EMPTY>"), flush=True)
     print("[BOOT] CORS_ALLOW_ORIGINS:", _parse_cors_origins(), flush=True)
+
+    # ✅ IMPORTANT:
+    # Snapshot mail scheduler는 FastAPI workers 수만큼 중복 실행되므로
+    # 여기(main.py)에서 절대 실행하지 않음.
+    # → app/run_mailer.py에서 단독 프로세스로 실행한다.
     yield
     print("[SHUTDOWN] app stopped", flush=True)
 
@@ -126,7 +132,6 @@ async def app_middlewares(request: Request, call_next):
     try:
         response = await call_next(request)
 
-        # JSON 응답 Content-Type에 charset이 없으면 보정
         ctype = response.headers.get("content-type", "")
         if ctype.startswith("application/json") and "charset=" not in ctype.lower():
             response.headers["content-type"] = "application/json; charset=utf-8"
@@ -173,3 +178,4 @@ app.include_router(master_sample_info_router)
 app.include_router(production_progress_graph_router)
 app.include_router(events_sse_router)
 app.include_router(events_sections_router)
+app.include_router(demon_health_router)

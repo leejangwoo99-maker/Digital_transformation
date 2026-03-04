@@ -6,7 +6,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -30,27 +30,16 @@ STATION_ORDER = ["FCT1", "FCT2", "FCT3", "FCT4", "Vision1", "Vision2"]
 # Helpers
 # -----------------------------
 def _now_prod_day_shift() -> tuple[str, str]:
-    """
-    Shift window (KST):
-      - day   : 08:30 ~ 20:30  (same prod_day)
-      - night : 20:30 ~ next day 08:30
-        * if now < 08:30 => prod_day = yesterday, shift=night
-        * if now >= 20:30 => prod_day = today, shift=night
-    """
     now = datetime.now(tz=KST)
 
     day_start = now.replace(hour=8, minute=30, second=0, microsecond=0)
     night_start = now.replace(hour=20, minute=30, second=0, microsecond=0)
 
     if day_start <= now < night_start:
-        # ✅ 08:30~20:30 => day
         return now.strftime("%Y%m%d"), "day"
-
     if now >= night_start:
-        # ✅ 20:30~24:00 => night (prod_day = today)
         return now.strftime("%Y%m%d"), "night"
 
-    # ✅ 00:00~08:30 => night (prod_day = yesterday)
     y = (now - timedelta(days=1)).strftime("%Y%m%d")
     return y, "night"
 
@@ -89,9 +78,8 @@ def _drop_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 
 def _safe_call(fn, *args, **kwargs):
     """
-    ✅ kwargs(timeout=...) 등을 넘겨도
-    - fn이 kwargs를 못 받으면 자동으로 kwargs 제거 후 재시도
-    - streamlit UI가 죽지 않도록 예외는 None 처리
+    - fn이 kwargs(timeout=...) 등을 못 받는 경우 자동으로 kwargs 제거 후 재시도
+    - UI 크래시 방지: 실패 시 None
     """
     try:
         if fn is None:
@@ -119,10 +107,11 @@ def _get_api_fn(*names: str):
 
 
 def _api_base_url() -> str:
-    # api_client.py 기준: API 변수가 실제 base url
-    v = getattr(api, "API", None)
-    if isinstance(v, str) and v.strip().startswith("http"):
-        return v.strip().rstrip("/")
+    # api_client.py에서 API / API_BASE_URL 등 다양한 이름을 쓸 수 있어서 폭넓게 탐색
+    for attr in ("API_BASE_URL", "BASE_URL", "API_URL", "API"):
+        v = getattr(api, attr, None)
+        if isinstance(v, str) and v.strip().startswith("http"):
+            return v.strip().rstrip("/")
     return "http://127.0.0.1:8000"
 
 
@@ -135,15 +124,9 @@ def _station_sort_key(stn: Any) -> int:
 
 
 def _shift_window_for_prod_day(prod_day: str, shift_type: str) -> Tuple[datetime, datetime]:
-    """
-    prod_day(yyyymmdd) 기준 shift window
-    - day   : 08:30 ~ 20:30 (same day)
-    - night : 20:30 ~ next day 08:30
-    """
     d = _norm_day(prod_day)
     if not d:
-        now = datetime.now(tz=KST)
-        d = now.strftime("%Y%m%d")
+        d = datetime.now(tz=KST).strftime("%Y%m%d")
 
     base = datetime.strptime(d, "%Y%m%d").replace(tzinfo=KST)
 
@@ -158,7 +141,6 @@ def _shift_window_for_prod_day(prod_day: str, shift_type: str) -> Tuple[datetime
 
 
 def _parse_alarm_dt(end_day_yyyy_mm_dd: str, end_time_hms: str) -> Optional[datetime]:
-    # alarm_record: end_day="yyyy-mm-dd"(text), end_time="HH:MM:SS"(text), KST 기준
     try:
         d = str(end_day_yyyy_mm_dd or "").strip()
         t = str(end_time_hms or "").strip()
@@ -171,22 +153,18 @@ def _parse_alarm_dt(end_day_yyyy_mm_dd: str, end_time_hms: str) -> Optional[date
 
 
 # -----------------------------
-# ✅ 02와 동일한 "비차단 + 중앙" 알람 SSE 모달
+# ✅ 02와 동일한 "비차단 + 중앙" 알람 SSE 모달 (안정버전)
 # -----------------------------
-def _mount_alarm_sse(cur_day: str, cur_shift: str):
-    """
-    - 브라우저가 FastAPI SSE 직접 구독
-    - event: hello/init/alarm 수신
-    - ✅ 비차단(클릭 막지 않음) + 중앙(62% 폭) 표시
-    - ✅ 확인/ X 는 즉시 닫힘
-    - 중복 방지: sessionStorage acked_alarm_pks
-    """
+def _mount_alarm_sse(now_day: str, now_shift: str, view_day: str, view_shift: str):
     base = _api_base_url().rstrip("/")
 
     admin_pass = (getattr(api, "ADMIN_PASS", "") or "").strip() or (os.getenv("ADMIN_PASS", "") or "").strip()
     token_qs = f"&token={admin_pass}" if admin_pass else ""
 
-    sse_url = f"{base}/events/stream?end_day={cur_day}&shift_type={cur_shift}&sections=alarm{token_qs}"
+    sse_url = f"{base}/events/stream?end_day={now_day}&shift_type={now_shift}&sections=alarm{token_qs}"
+
+    view_day_norm = _norm_day(view_day) or now_day
+    view_shift_norm = _norm_shift(view_shift)
 
     components.html(
         f"""
@@ -196,6 +174,9 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
           const url = {json.dumps(sse_url)};
           const ALLOWED = new Set(["권고","긴급","교체"]);
           const ACK_KEY = "acked_alarm_pks";
+
+          const VIEW_DAY   = {json.dumps(view_day_norm)};
+          const VIEW_SHIFT = {json.dumps(view_shift_norm)};
 
           function log(...args) {{
             try {{ console.log("[ALARM_SSE]", ...args); }} catch(e) {{}}
@@ -208,6 +189,69 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
               .replaceAll(">","&gt;")
               .replaceAll('"',"&quot;")
               .replaceAll("'","&#39;");
+          }}
+
+          function _digits8(s) {{
+            const t = String(s||"").trim();
+            const digits = t.replace(/\\D/g, "");
+            return digits.length >= 8 ? digits.slice(0,8) : "";
+          }}
+
+          function parseYmdToUtcMs(ymd) {{
+            const d = _digits8(ymd);
+            if (!d) return null;
+            const y = Number(d.slice(0,4));
+            const m = Number(d.slice(4,6)) - 1;
+            const dd = Number(d.slice(6,8));
+            return Date.UTC(y, m, dd, 0, 0, 0, 0);
+          }}
+
+          function parseHmsToSec(hms) {{
+            const t = String(hms||"").trim();
+            if (t.length < 5) return 0;
+            const hh = Number(t.slice(0,2) || 0);
+            const mm = Number(t.slice(3,5) || 0);
+            const ss = Number(t.slice(6,8) || 0);
+            return hh*3600 + mm*60 + ss;
+          }}
+
+          function kstDateFromEndDayTime(endDay, endTime) {{
+            const utc0 = parseYmdToUtcMs(endDay);
+            if (utc0 == null) return null;
+            const sec = parseHmsToSec(endTime);
+            const ms = utc0 + (9*3600 + sec)*1000;
+            return new Date(ms);
+          }}
+
+          function viewWindowKst(viewDay, viewShift) {{
+            const utc0 = parseYmdToUtcMs(viewDay);
+            if (utc0 == null) return [null, null];
+
+            const kst0 = utc0 + 9*3600*1000;
+            const dayStart   = kst0 + (8*3600 + 30*60)*1000;
+            const nightStart = kst0 + (20*3600 + 30*60)*1000;
+
+            const sh = String(viewShift||"").toLowerCase();
+            if (sh === "day") {{
+              return [new Date(dayStart), new Date(nightStart)];
+            }}
+
+            const nextKst0 = kst0 + 24*3600*1000;
+            const nextDayStart = nextKst0 + (8*3600 + 30*60)*1000;
+            return [new Date(nightStart), new Date(nextDayStart)];
+          }}
+
+          const VIEW_W = viewWindowKst(VIEW_DAY, VIEW_SHIFT);
+
+          function inViewWindow(row) {{
+            try {{
+              const dt = kstDateFromEndDayTime(row.end_day, row.end_time);
+              const ws = VIEW_W[0], we = VIEW_W[1];
+              if (!dt || !ws || !we) return false;
+              return (dt >= ws && dt <= we);
+            }} catch(e) {{
+              return false;
+            }}
           }}
 
           function getAcked() {{
@@ -235,7 +279,6 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
 
           function showModal(pk, message) {{
             const doc = W.document;
-
             const acked = getAcked();
             if (acked.includes(pk)) {{
               log("skip acked pk=", pk);
@@ -249,28 +292,27 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
 
             closeExistingModal();
 
-            // ✅ overlay는 깔되, "비차단" 위해 pointer-events:none
             const overlay = doc.createElement("div");
             overlay.id = "alarmModal_" + pk;
             overlay.style.cssText = `
               position: fixed; z-index: 2147483647;
               left: 0; top: 0; width: 100%; height: 100%;
-              background: rgba(0,0,0,0.00);
-              display: flex; align-items: center; justify-content: center;
+              background: transparent;
               pointer-events: none;
+              display: flex; align-items: center; justify-content: center;
             `;
 
-            // ✅ 실제 박스만 클릭되게 pointer-events:auto
             const box = doc.createElement("div");
             box.style.cssText = `
               width: 62%;
-              max-width: 920px;
+              max-width: 980px;
               background: white;
               border-radius: 14px;
               padding: 18px 22px;
               box-shadow: 0 10px 28px rgba(0,0,0,0.25);
               font-family: sans-serif;
               pointer-events: auto;
+              border: 1px solid rgba(0,0,0,0.08);
             `;
 
             const closeId = "alarmCloseX_" + pk;
@@ -279,19 +321,23 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
             box.innerHTML = `
               <div style="display:flex; align-items:center; justify-content:space-between;">
                 <div style="font-size:22px; font-weight:800;">⚠️ 알람 발생</div>
-                <button id="${{closeId}}" style="border:none;background:transparent;font-size:22px;cursor:pointer;">✕</button>
+                <button id="` + closeId + `" style="border:none;background:transparent;font-size:22px;cursor:pointer;">✕</button>
               </div>
 
               <div style="margin-top:14px; padding:12px 14px; border-radius:10px;
                           background:#fff9db; color:#5c4a00; font-size:16px;">
-                ${{safeText(message)}}
+                ` + safeText(message) + `
               </div>
 
               <div style="margin-top:16px; display:flex; gap:12px;">
-                <button id="${{ackId}}" style="flex:1; padding:10px 0; border-radius:10px;
+                <button id="` + ackId + `" style="flex:1; padding:10px 0; border-radius:10px;
                         border:1px solid #ddd; background:white; cursor:pointer; font-size:15px;">
                   확인
                 </button>
+              </div>
+
+              <div style="margin-top:10px; font-size:12px; color:#666;">
+                ※ 이 알람은 비차단 모달입니다. 뒤 화면 조작이 가능합니다.
               </div>
             `;
 
@@ -303,18 +349,20 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
               if (el) el.remove();
             }}
 
-            const closeBtn = overlay.querySelector("#" + closeId);
-            const ackBtn = overlay.querySelector("#" + ackId);
+            const closeBtn = box.querySelector("#" + closeId);
+            const ackBtn = box.querySelector("#" + ackId);
 
             if (closeBtn) {{
-              closeBtn.addEventListener("click", function() {{
+              closeBtn.addEventListener("click", function(ev) {{
+                try {{ ev.preventDefault(); ev.stopPropagation(); }} catch(e) {{}}
                 log("close X pk=", pk);
                 closeModal();
               }});
             }}
 
             if (ackBtn) {{
-              ackBtn.addEventListener("click", function() {{
+              ackBtn.addEventListener("click", function(ev) {{
+                try {{ ev.preventDefault(); ev.stopPropagation(); }} catch(e) {{}}
                 log("ack pk=", pk);
                 addAck(pk);
                 closeModal();
@@ -327,10 +375,10 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
             const stn = String(row.station || "").trim();
             const sp  = String(row.sparepart || "").trim();
 
-            if (t === "권고") return `${{stn}}, ${{sp}} 교체 권고 드립니다.`;
-            if (t === "긴급") return `${{stn}}, ${{sp}} 교체 긴급합니다.`;
-            if (t === "교체") return `${{stn}}, ${{sp}} 교체 타이밍이 지났습니다.`;
-            return `${{stn}}, ${{sp}} 알람(${{t}})`;
+            if (t === "권고") return stn + ", " + sp + " 교체 권고 드립니다.";
+            if (t === "긴급") return stn + ", " + sp + " 교체 긴급합니다.";
+            if (t === "교체") return stn + ", " + sp + " 교체 타이밍이 지났습니다.";
+            return stn + ", " + sp + " 알람(" + t + ")";
           }}
 
           function handleAlarm(obj, fromEvent) {{
@@ -349,16 +397,23 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
               return;
             }}
 
+            if (!inViewWindow(row)) {{
+              log(fromEvent, "skip out-of-window(view)", row);
+              return;
+            }}
+
             if (!pk) {{
               const id = row.id != null ? String(row.id) : "";
               if (!id) {{
                 log(fromEvent, "no pk/id", row);
                 return;
               }}
+              log(fromEvent, "fallback id as pk:", id);
               showModal(id, makeMessage(row));
               return;
             }}
 
+            log(fromEvent, "show pk=", pk, row);
             showModal(pk, makeMessage(row));
           }}
 
@@ -419,7 +474,7 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
 
 
 # -----------------------------
-# UI: 02와 동일하게 prod_day / shift_type 검색 + 전체 새로고침
+# UI (02와 동일)
 # -----------------------------
 st.set_page_config(page_title="생산 분석", layout="wide")
 
@@ -429,8 +484,7 @@ if "analysis_prod_day" not in st.session_state:
 if "analysis_shift_type" not in st.session_state:
     st.session_state.analysis_shift_type = default_shift
 
-# 상단 검색 UI (02page 스타일)
-st.markdown("### 📌 생산 정보 (주간/야간)")
+st.markdown("### 📌 생산 분석 (주간/야간)")
 c1, c2, c3, c4 = st.columns([2.2, 1.2, 0.9, 1.1])
 
 with c1:
@@ -448,7 +502,6 @@ with c3:
         st.rerun()
 with c4:
     if st.button("전체 새로고침", use_container_width=True):
-        # 캐시 쓰는 페이지들이 있을 수 있으니 함께 클리어
         try:
             st.cache_data.clear()
         except Exception:
@@ -464,11 +517,10 @@ shift_type = _norm_shift(st.session_state.analysis_shift_type)
 
 st.caption(f"현재 조회: prod_day={prod_day} / shift_type={shift_type}")
 
-# ✅ 알람 SSE는 선택된 prod_day/shift_type로 구독
-# 변경
+# ✅ 실시간 알람 팝업(SSE)은 "현재 운영중인 shift" 조회일 때만
 now_day, now_shift = _now_prod_day_shift()
 if (prod_day == now_day) and (shift_type == now_shift):
-    _mount_alarm_sse(prod_day, shift_type)
+    _mount_alarm_sse(now_day, now_shift, prod_day, shift_type)
 else:
     st.caption("과거 날짜 조회 중: 실시간 알람 팝업(SSE)은 비활성화됩니다.")
 
@@ -488,11 +540,8 @@ fn_alarm_recent = _get_api_fn(
 
 alarm_df = pd.DataFrame()
 if fn_alarm_recent:
-    # 변경(추천):
     resp = _safe_call(fn_alarm_recent, prod_day, shift_type, timeout=5.0)
     alarm_df = _df_from_resp(resp)
-
-    # ✅ 1회 재시도(초기 warm-up/순간 네트워크 대응)
     if alarm_df.empty:
         resp2 = _safe_call(fn_alarm_recent, prod_day, shift_type, timeout=8.0)
         alarm_df = _df_from_resp(resp2)
@@ -504,7 +553,6 @@ if not _is_empty_df(alarm_df):
             alarm_df[c] = ""
     alarm_df = alarm_df[keep].copy()
 
-    # shift window 필터: 선택 prod_day 기준
     w_start, w_end = _shift_window_for_prod_day(prod_day, shift_type)
 
     def _in_window(r) -> bool:
@@ -515,11 +563,9 @@ if not _is_empty_df(alarm_df):
 
     alarm_df = alarm_df[alarm_df.apply(_in_window, axis=1)].copy()
 
-    # 타입 필터
     alarm_df["type_alarm"] = alarm_df["type_alarm"].astype(str).str.strip().str.replace(" ", "")
     alarm_df = alarm_df[alarm_df["type_alarm"].isin(list(ALARM_ALLOWED_TYPES))].copy()
 
-    # station 정렬(FCT1 최상단)
     alarm_df["__k"] = alarm_df["station"].apply(_station_sort_key)
     alarm_df = alarm_df.sort_values(["__k", "end_day", "end_time"], ascending=[True, True, True]).drop(columns=["__k"])
 
@@ -530,11 +576,10 @@ else:
 
 st.divider()
 
-
 # -----------------------------
 # 2) [AI 경고] PD-BOARD 열화 모니터링
 # -----------------------------
-st.markdown("### [AI 경고] PD-BOARD 열화 모니터링 (WARNING은 교체 검토 필요 / CRITICAL은 교체 필요)")
+st.markdown("### [AI 경고] PD-BOARD 열화 모니터링 (WARNING은 교체 검토 필요, 교체됬다면 모니터링 필요 / CRITICAL은 교체 필요)")
 
 fn_pd = _get_api_fn(
     "get_pd_board_check",
@@ -554,7 +599,6 @@ if not _is_empty_df(pd_df):
             pd_df[c] = None
     pd_df = pd_df[need].copy()
 
-    # ✅ end_day 포맷 정규화 (yyyy-mm-dd / yyyymmdd 모두 대응)
     def _norm_end_day_any(v: Any) -> str:
         s = str(v or "").strip()
         digits = "".join(ch for ch in s if ch.isdigit())
@@ -562,23 +606,15 @@ if not _is_empty_df(pd_df):
 
     pd_df["end_day_norm"] = pd_df["end_day"].apply(_norm_end_day_any)
 
-    # ✅ 사용자가 검색한 prod_day로 필터
     want_day = _norm_day(prod_day)
     pd_df_sel = pd_df[pd_df["end_day_norm"] == want_day].copy()
-
-    # (선택) 해당 날짜 데이터가 없으면 최신으로 fallback 하고 싶으면 아래 주석 해제
-    # if pd_df_sel.empty and not pd_df.empty:
-    #     latest = max(pd_df["end_day_norm"].tolist())
-    #     pd_df_sel = pd_df[pd_df["end_day_norm"] == latest].copy()
 
     if pd_df_sel.empty:
         st.info(f"PD-BOARD 데이터가 없습니다. (end_day={want_day})")
     else:
-        # station 정렬(FCT1 최상단)
         pd_df_sel["__k"] = pd_df_sel["station"].apply(_station_sort_key)
         pd_df_sel = pd_df_sel.sort_values(["__k", "station"], ascending=[True, True]).drop(columns=["__k"])
 
-        # 표에서는 cosine_similarity 제외
         pd_table = pd_df_sel[["end_day", "station", "last_status"]].copy()
 
         def _style_status(v: Any) -> str:
@@ -595,9 +631,8 @@ if not _is_empty_df(pd_df):
             hide_index=True,
         )
 
-        # cosine 그래프는 "선택 날짜 데이터의 series"만 그리게 유지
         def _parse_cos(v: Any) -> Any:
-            if isinstance(v, (dict, list)):
+            if isinstance(v, dict):
                 return v
             if isinstance(v, str) and v.strip().startswith("{"):
                 try:
@@ -683,6 +718,7 @@ if not _is_empty_df(pd_df):
 else:
     st.info("PD-BOARD 모니터링 데이터가 없습니다.")
 
+st.divider()
 
 # =========================================================
 # 3) FCT worst case
@@ -704,7 +740,6 @@ else:
 
 st.divider()
 
-
 # =========================================================
 # 4) 조립 공정 불량에 따른 낭비시간
 # =========================================================
@@ -725,7 +760,6 @@ else:
 
 st.divider()
 
-
 # =========================================================
 # 5) MES 불량에 따른 낭비시간
 # =========================================================
@@ -739,3 +773,12 @@ if _is_empty_df(df_h):
 else:
     df_h = _drop_cols(df_h, ["updated_at"])
     st.dataframe(df_h, use_container_width=True, hide_index=True)
+
+import streamlit.components.v1 as components
+
+def _snap_mark_ready():
+    # 스냅샷이든 아니든 넣어도 문제없음 (height=0)
+    components.html('<div id="__snap_ready__" style="display:none">READY</div>', height=0)
+
+# ... 모든 차트/데이터프레임 렌더링이 끝난 다음:
+_snap_mark_ready()

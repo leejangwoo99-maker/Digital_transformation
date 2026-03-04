@@ -2,13 +2,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple, Any, Optional
 import hashlib
 import json
 import time as time_mod
 import os
+import sys
+import io
+import contextlib
+import traceback
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -55,62 +59,10 @@ NONOP_MAX_BUFFER = 500
 NONOP_VIEW_STEP = 10
 NONOP_VIEW_DEFAULT = 10
 
-
 # =========================================================
-# ✅ ENV helpers (운영에서 .env로 조절)
+# ✅ 생산 비정상 STOP(스냅샷/메일러) 버튼 상태키
 # =========================================================
-def _env_int(name: str, default: int, min_v: int, max_v: int) -> int:
-    raw = os.getenv(name, "")
-    if raw is None:
-        return default
-    s = str(raw).strip()
-    if not s:
-        return default
-    try:
-        v = int(float(s))  # "5.0" 같은 값도 허용
-    except Exception:
-        return default
-    if v < min_v:
-        return min_v
-    if v > max_v:
-        return max_v
-    return v
-
-
-def _env_float(name: str, default: float, min_v: float, max_v: float) -> float:
-    raw = os.getenv(name, "")
-    if raw is None:
-        return default
-    s = str(raw).strip()
-    if not s:
-        return default
-    try:
-        v = float(s)
-    except Exception:
-        return default
-    if v < min_v:
-        return min_v
-    if v > max_v:
-        return max_v
-    return v
-
-
-# ✅ 주기 분리 (기본 5초, 운영에서 ST_*로 조절)
-SYNC_EVERY_SEC = _env_int("ST_SYNC_SEC", default=5, min_v=1, max_v=60)
-CHART_EVERY_SEC = _env_int("ST_CHART_SEC", default=5, min_v=1, max_v=60)
-NONOP_EVERY_SEC = _env_int("ST_NONOP_SEC", default=5, min_v=1, max_v=60)
-
-# ✅ changes API 호출 상한 (기본 2000)
-NONOP_CHANGES_LIMIT = _env_int("ST_NONOP_CHANGES_LIMIT", default=2000, min_v=100, max_v=20000)
-
-# ✅ API timeout
-SECTIONS_LATEST_TIMEOUT = _env_float("ST_SECTIONS_LATEST_TIMEOUT", default=8.0, min_v=1.0, max_v=30.0)
-NONOP_WINDOW_TIMEOUT = _env_float("ST_NONOP_WINDOW_TIMEOUT", default=8.0, min_v=1.0, max_v=30.0)
-NONOP_CHANGES_TIMEOUT = _env_float("ST_NONOP_CHANGES_TIMEOUT", default=4.0, min_v=1.0, max_v=30.0)
-NONOP_UPDATE_TIMEOUT = _env_float("ST_NONOP_UPDATE_TIMEOUT", default=10.0, min_v=1.0, max_v=60.0)
-
-# ✅ 편집 중 lock(초) - 요청: 15초 고정 (env 무시)
-NONOP_EDIT_LOCK_SEC = 15.0
+SNAPSHOT_BTN_KEY = "btn_prod_abnormal_stop"
 
 
 # =========================================================
@@ -229,6 +181,93 @@ def inject_no_dim_fade_keep_loading():
         """,
         height=0,
     )
+
+
+# =========================================================
+# ✅ Query param helpers (snap=1 안정화용)
+# =========================================================
+def _qparam_get(name: str, default: str = "") -> str:
+    try:
+        q = st.query_params
+        v = q.get(name, None)
+        if v is None:
+            return default
+        if isinstance(v, (list, tuple)):
+            v = v[0] if v else default
+        s = str(v).strip()
+        return s if s else default
+    except Exception:
+        return default
+
+
+def _qparam_bool(name: str) -> bool:
+    s = _qparam_get(name, "")
+    if not s:
+        return False
+    s = s.lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+
+def _is_snap() -> bool:
+    # print-to-pdf 모드: URL에 snap=1
+    return _qparam_bool("snap")
+
+
+# =========================================================
+# ✅ ENV helpers (운영에서 .env로 조절)
+# =========================================================
+def _env_int(name: str, default: int, min_v: int, max_v: int) -> int:
+    raw = os.getenv(name, "")
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        v = int(float(s))  # "5.0" 같은 값도 허용
+    except Exception:
+        return default
+    if v < min_v:
+        return min_v
+    if v > max_v:
+        return max_v
+    return v
+
+
+def _env_float(name: str, default: float, min_v: float, max_v: float) -> float:
+    raw = os.getenv(name, "")
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        v = float(s)
+    except Exception:
+        return default
+    if v < min_v:
+        return min_v
+    if v > max_v:
+        return max_v
+    return v
+
+
+# ✅ 주기 분리 (기본 5초, 운영에서 ST_*로 조절)
+SYNC_EVERY_SEC = _env_int("ST_SYNC_SEC", default=5, min_v=1, max_v=60)
+CHART_EVERY_SEC = _env_int("ST_CHART_SEC", default=5, min_v=1, max_v=60)
+NONOP_EVERY_SEC = _env_int("ST_NONOP_SEC", default=5, min_v=1, max_v=60)
+
+# ✅ changes API 호출 상한 (기본 2000)
+NONOP_CHANGES_LIMIT = _env_int("ST_NONOP_CHANGES_LIMIT", default=2000, min_v=100, max_v=20000)
+
+# ✅ API timeout
+SECTIONS_LATEST_TIMEOUT = _env_float("ST_SECTIONS_LATEST_TIMEOUT", default=8.0, min_v=1.0, max_v=30.0)
+NONOP_WINDOW_TIMEOUT = _env_float("ST_NONOP_WINDOW_TIMEOUT", default=8.0, min_v=1.0, max_v=30.0)
+NONOP_CHANGES_TIMEOUT = _env_float("ST_NONOP_CHANGES_TIMEOUT", default=4.0, min_v=1.0, max_v=30.0)
+NONOP_UPDATE_TIMEOUT = _env_float("ST_NONOP_UPDATE_TIMEOUT", default=10.0, min_v=1.0, max_v=60.0)
+
+# ✅ 편집 중 lock(초) - 요청: 15초 고정 (env 무시)
+NONOP_EDIT_LOCK_SEC = 15.0
 
 
 # =========================================================
@@ -370,6 +409,82 @@ def normalize_day_yyyymmdd(v: Any) -> str:
 
 
 # =========================================================
+# ✅ Alarm scope (client-side / fallback filter용)
+# =========================================================
+def _parse_day_to_date(v: Any) -> Optional[date]:
+    s = str(v or "").strip()
+    if not s:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 8:
+        try:
+            y = int(digits[:4])
+            m = int(digits[4:6])
+            d = int(digits[6:8])
+            return date(y, m, d)
+        except Exception:
+            return None
+    return None
+
+
+def _parse_time_hms(v: Any) -> Optional[Tuple[int, int, int]]:
+    s = str(v or "").strip()
+    if not s:
+        return None
+    if "T" in s:
+        try:
+            dt = _parse_iso_any(s)
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=KST)
+            dt = dt.astimezone(KST)
+            return (dt.hour, dt.minute, dt.second)
+        except Exception:
+            return None
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            hh = int(parts[0])
+            mm = int(parts[1]) if len(parts) > 1 else 0
+            ss = int(str(parts[2]).split(".")[0]) if len(parts) > 2 else 0
+            return (hh, mm, ss)
+        except Exception:
+            return None
+    return None
+
+
+def alarm_scope_from_row(row: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    return: (prod_day_yyyymmdd, shift_type)
+    shift rule:
+      - day   : 08:30 ~ 20:30
+      - night : otherwise
+        * night & time < 08:30 => prod_day = (end_day - 1)
+        * night & time >= 20:30 => prod_day = end_day
+    """
+    d = _parse_day_to_date(row.get("end_day") or row.get("prod_day") or "")
+    if d is None:
+        dd = normalize_day_yyyymmdd(row.get("end_day") or row.get("prod_day") or "")
+        return (dd, "day")
+
+    t = _parse_time_hms(row.get("end_time") or row.get("time") or "")
+    if t is None:
+        return (d.strftime("%Y%m%d"), "day")
+
+    hh, mm, ss = t
+    is_day = (hh > 8 and hh < 20) or (hh == 8 and mm >= 30) or (hh == 20 and mm < 30)
+    if is_day:
+        return (d.strftime("%Y%m%d"), "day")
+
+    if (hh < 8) or (hh == 8 and mm < 30):
+        pd2 = (d - timedelta(days=1)).strftime("%Y%m%d")
+        return (pd2, "night")
+
+    return (d.strftime("%Y%m%d"), "night")
+
+
+# =========================================================
 # perf log
 # =========================================================
 def _perf_push(name: str, ms: float, extra: Optional[Dict[str, Any]] = None):
@@ -411,9 +526,55 @@ def alarm_pk_from_token(row: Dict[str, Any]) -> str:
 
 
 # =========================================================
+# ✅ 생산 비정상 STOP 실행 (snapshot_mailer.run_snapshot_and_mail)
+# - 요청 커맨드:
+#   cd C:\Users\user\PycharmProjects\PythonProject
+#   python -c "from app.job.snapshot_mailer import run_snapshot_and_mail; run_snapshot_and_mail()"
+# - Streamlit 내부에서는 동일 동작을 "직접 import 호출"로 수행(쉘/경로 의존 최소화)
+# =========================================================
+def _run_production_abnormal_stop() -> Dict[str, Any]:
+    t0 = time_mod.perf_counter()
+    buf_out = io.StringIO()
+    buf_err = io.StringIO()
+
+    try:
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            # ✅ [FIX] Windows + Python 3.13 + Streamlit 환경에서 Playwright subprocess NotImplementedError 방지
+            # - Playwright(sync) 내부가 asyncio subprocess를 사용 → Windows는 Proactor loop 정책이 필요할 수 있음
+            if sys.platform.startswith("win"):
+                try:
+                    import asyncio  # noqa: WPS433
+                    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+                except Exception:
+                    pass
+
+            # 동일 프로세스 내 실행 (가장 안정적)
+            from app.job.snapshot_mailer import run_snapshot_and_mail  # noqa: WPS433
+
+            run_snapshot_and_mail()
+
+        ms = (time_mod.perf_counter() - t0) * 1000.0
+        return {
+            "ok": True,
+            "ms": ms,
+            "stdout": buf_out.getvalue()[-20000:],
+            "stderr": buf_err.getvalue()[-20000:],
+        }
+    except Exception as e:
+        ms = (time_mod.perf_counter() - t0) * 1000.0
+        tb = traceback.format_exc(limit=12)
+        return {
+            "ok": False,
+            "ms": ms,
+            "error": str(e),
+            "trace": tb,
+            "stdout": buf_out.getvalue()[-20000:],
+            "stderr": buf_err.getvalue()[-20000:],
+        }
+
+
+# =========================================================
 # ✅ SSE alarm (01페이지에도 적용)
-# - 비차단 toast panel
-# - sessionStorage acked_alarm_pks 로 중복 방지
 # =========================================================
 def _api_base_url() -> str:
     for attr in ("API_BASE_URL", "BASE_URL", "API_URL", "API"):
@@ -424,6 +585,15 @@ def _api_base_url() -> str:
 
 
 def _mount_alarm_sse(cur_day: str, cur_shift: str):
+    """
+    ✅ SSE 알람 구독 (01페이지)
+    - Python f-string 안에서 JS 템플릿리터럴 `${...}` 충돌(NameError) 방지:
+      -> f-string 금지, json.dumps로만 값 주입
+    - scope 필터: (prod_day, shift_type) 일치하는 알람만 표시
+    - allowed type: 권고/긴급/교체
+    - ack: sessionStorage로 pk별 확인(재표시 방지)
+    - modal: 비차단(pointer-events: none overlay / box는 auto)
+    """
     base = _api_base_url().rstrip("/")
 
     admin_pass = (getattr(api, "ADMIN_PASS", "") or "").strip() or (os.getenv("ADMIN_PASS", "") or "").strip()
@@ -431,221 +601,321 @@ def _mount_alarm_sse(cur_day: str, cur_shift: str):
 
     sse_url = f"{base}/events/stream?end_day={cur_day}&shift_type={cur_shift}&sections=alarm{token_qs}"
 
-    components.html(
-        f"""
-        <script>
-        (function() {{
-          const W = window.parent;
-          const url = {json.dumps(sse_url)};
-          const ALLOWED = new Set(["권고","긴급","교체"]);
-          const ACK_KEY = "acked_alarm_pks";
+    # ✅ JS에 안전하게 값 주입
+    js_url = json.dumps(sse_url)
+    js_day = json.dumps(str(cur_day))
+    js_shift = json.dumps(str(cur_shift))
 
-          // ✅ 02와 동일 계열: 중앙 모달(비차단)
-          const OVERLAY_ID_PREFIX = "alarmOverlay_";
+    js = """
+    <script>
+    (function () {
+      const W = window.parent;
+      const url = __URL__;
+      const TARGET_DAY = __DAY__;
+      const TARGET_SHIFT = __SHIFT__;
+      const ALLOWED = new Set(["권고","긴급","교체"]);
+      const ACK_KEY = "acked_alarm_pks";
+      const OVERLAY_ID_PREFIX = "alarmOverlay_";
 
-          function log(...args) {{
-            try {{ console.log("[ALARM_SSE_01]", ...args); }} catch(e) {{}}
-          }}
+      function log() {
+        try { console.log("[ALARM_SSE_01]", ...arguments); } catch(e) {}
+      }
 
-          function safeText(s) {{
-            return String(s||"")
-              .replaceAll("&","&amp;")
-              .replaceAll("<","&lt;")
-              .replaceAll(">","&gt;")
-              .replaceAll('"',"&quot;")
-              .replaceAll("'","&#39;");
-          }}
+      function safeText(s) {
+        return String(s || "")
+          .replaceAll("&","&amp;")
+          .replaceAll("<","&lt;")
+          .replaceAll(">","&gt;")
+          .replaceAll('"',"&quot;")
+          .replaceAll("'","&#39;");
+      }
 
-          function getAcked() {{
-            try {{
-              const v = JSON.parse(W.sessionStorage.getItem(ACK_KEY) || "[]");
-              return Array.isArray(v) ? v : [];
-            }} catch(e) {{
-              return [];
-            }}
-          }}
+      function normDay(v) {
+        const s = String(v || "").trim();
+        const digits = s.replace(/\\D/g, "");
+        return (digits.length >= 8) ? digits.slice(0, 8) : "";
+      }
 
-          function addAck(pk) {{
-            try {{
-              const arr = getAcked();
-              if (!arr.includes(pk)) arr.push(pk);
-              W.sessionStorage.setItem(ACK_KEY, JSON.stringify(arr));
-            }} catch(e) {{}}
-          }}
+      function parseHms(v) {
+        const s = String(v || "").trim();
+        if (!s) return null;
 
-          function removeExistingOverlays(doc) {{
-            const olds = Array.from(doc.querySelectorAll('div[id^="alarmOverlay_"]'));
-            for (const el of olds) el.remove();
-          }}
+        // ISO
+        if (s.includes("T")) {
+          try {
+            const dt = new Date(s);
+            if (isNaN(dt.getTime())) return null;
+            return { hh: dt.getHours(), mm: dt.getMinutes(), ss: dt.getSeconds() };
+          } catch (e) {
+            return null;
+          }
+        }
 
-          function closeOverlay(doc, pk) {{
-            const el = doc.getElementById(OVERLAY_ID_PREFIX + pk);
-            if (el) el.remove();
-          }}
+        if (!s.includes(":")) return null;
+        const p = s.split(":");
+        const hh = parseInt(p[0] || "0", 10);
+        const mm = parseInt(p[1] || "0", 10);
+        const ss = parseInt(String(p[2] || "0").split(".")[0], 10);
 
-          function makeMessage(row) {{
-            const t = String(row.type_alarm || "").trim().replaceAll(" ","");
-            const stn = String(row.station || "").trim();
-            const sp  = String(row.sparepart || "").trim();
-            if (t === "권고") return `${{stn}}, ${{sp}} 교체 권고 드립니다.`;
-            if (t === "긴급") return `${{stn}}, ${{sp}} 교체 긴급합니다.`;
-            if (t === "교체") return `${{stn}}, ${{sp}} 교체 타이밍이 지났습니다.`;
-            return `${{stn}}, ${{sp}} 알람(${{t}})`;
-          }}
+        if (Number.isNaN(hh) || Number.isNaN(mm) || Number.isNaN(ss)) return null;
+        return { hh, mm, ss };
+      }
 
-          // ✅ 중앙 배치 + 02처럼 큰 박스 + 비차단(overlay 클릭 막지 않음)
-          function showCenteredNonBlockingModal(pk, message) {{
-            const acked = getAcked();
-            if (acked.includes(pk)) {{
-              log("skip acked pk=", pk);
-              return;
-            }}
+      function yyyymmddToDate(yyyymmdd) {
+        if (!yyyymmdd || yyyymmdd.length !== 8) return null;
+        const y = parseInt(yyyymmdd.slice(0, 4), 10);
+        const m = parseInt(yyyymmdd.slice(4, 6), 10) - 1;
+        const d = parseInt(yyyymmdd.slice(6, 8), 10);
+        const dt = new Date(y, m, d);
+        return isNaN(dt.getTime()) ? null : dt;
+      }
 
-            const doc = W.document;
+      function dateToYyyymmdd(dt) {
+        const y = dt.getFullYear();
+        const m = String(dt.getMonth() + 1).padStart(2, "0");
+        const d = String(dt.getDate()).padStart(2, "0");
+        return String(y) + m + d;
+      }
 
-            // 이미 같은 pk가 떠있으면 스킵
-            if (doc.getElementById(OVERLAY_ID_PREFIX + pk)) return;
+      // ✅ Python의 alarm_scope_from_row와 동일 규칙
+      function computeScopeFromRow(row) {
+        const endDay = normDay(row.end_day || row.prod_day || "");
+        const t = parseHms(row.end_time || row.time || "");
+        if (!endDay || !t) {
+          return { prod_day: endDay || "", shift: "day" };
+        }
 
-            // ✅ 단일 알람만 유지(02와 동일 UX)
-            removeExistingOverlays(doc);
+        const hh = t.hh, mm = t.mm;
+        const isDay = (hh > 8 && hh < 20) || (hh === 8 && mm >= 30) || (hh === 20 && mm < 30);
+        if (isDay) return { prod_day: endDay, shift: "day" };
 
-            const overlay = doc.createElement("div");
-            overlay.id = OVERLAY_ID_PREFIX + pk;
-            overlay.style.cssText = `
-              position: fixed;
-              z-index: 2147483647;
-              left: 0; top: 0; width: 100%; height: 100%;
-              display: flex; align-items: center; justify-content: center;
-              background: rgba(0,0,0,0.0);     /* ✅ 배경 딤 제거 */
-              pointer-events: none;            /* ✅ 비차단 핵심 */
-            `;
+        // night & time < 08:30 => prod_day = (end_day - 1)
+        if (hh < 8 || (hh === 8 && mm < 30)) {
+          const dt = yyyymmddToDate(endDay);
+          if (!dt) return { prod_day: endDay, shift: "night" };
+          dt.setDate(dt.getDate() - 1);
+          return { prod_day: dateToYyyymmdd(dt), shift: "night" };
+        }
 
-            const box = doc.createElement("div");
-            box.style.cssText = `
-              width: 62%;
-              max-width: 980px;
-              background: white;
-              border-radius: 14px;
-              padding: 18px 22px;
-              box-shadow: 0 10px 28px rgba(0,0,0,0.25);
-              font-family: sans-serif;
-              border-left: 10px solid #f2c94c;
-              pointer-events: auto;            /* ✅ 박스만 클릭 가능 */
-            `;
+        // night & time >= 20:30 => prod_day = end_day
+        return { prod_day: endDay, shift: "night" };
+      }
 
-            box.innerHTML = `
-              <div style="display:flex; align-items:center; justify-content:space-between;">
-                <div style="font-size:22px; font-weight:800;">⚠️ 알람 발생</div>
-                <button id="alarmCloseX_${{pk}}" style="border:none;background:transparent;font-size:22px;cursor:pointer;">✕</button>
-              </div>
+      function isRowInTargetScope(row) {
+        try {
+          const sc = computeScopeFromRow(row);
+          if (!sc.prod_day) return false;
+          if (sc.prod_day !== TARGET_DAY) return false;
+          if (sc.shift !== TARGET_SHIFT) return false;
+          return true;
+        } catch (e) {
+          return false;
+        }
+      }
 
-              <div style="margin-top:14px; padding:12px 14px; border-radius:10px;
-                          background:#fff9db; color:#5c4a00; font-size:16px;">
-                ${{safeText(message)}}
-              </div>
+      function getAcked() {
+        try {
+          const v = JSON.parse(W.sessionStorage.getItem(ACK_KEY) || "[]");
+          return Array.isArray(v) ? v : [];
+        } catch (e) {
+          return [];
+        }
+      }
 
-              <div style="margin-top:16px; display:flex; gap:12px;">
-                <button id="alarmAckBtn_${{pk}}" style="flex:1; padding:10px 0; border-radius:10px;
-                        border:1px solid #ddd; background:white; cursor:pointer; font-size:15px;">
-                  확인
-                </button>
-              </div>
-            `;
+      function addAck(pk) {
+        try {
+          const arr = getAcked();
+          if (!arr.includes(pk)) arr.push(pk);
+          W.sessionStorage.setItem(ACK_KEY, JSON.stringify(arr));
+        } catch (e) {}
+      }
 
-            overlay.appendChild(box);
-            doc.body.appendChild(overlay);
+      function removeExistingOverlays(doc) {
+        const olds = Array.from(doc.querySelectorAll('div[id^="' + OVERLAY_ID_PREFIX + '"]'));
+        for (const el of olds) el.remove();
+      }
 
-            const xBtn = box.querySelector("#alarmCloseX_" + pk);
-            const aBtn = box.querySelector("#alarmAckBtn_" + pk);
+      function closeOverlay(doc, pk) {
+        const el = doc.getElementById(OVERLAY_ID_PREFIX + pk);
+        if (el) el.remove();
+      }
 
-            if (xBtn) xBtn.addEventListener("click", function() {{
-              // ✅ X는 "닫기만" (ACK 저장 안 함)
-              closeOverlay(doc, pk);
-            }});
+      function makeMessage(row) {
+        const t = String(row.type_alarm || "").trim().replaceAll(" ", "");
+        const stn = String(row.station || "").trim();
+        const sp  = String(row.sparepart || "").trim();
+        if (t === "권고") return `${stn}, ${sp} 교체 권고 드립니다.`;
+        if (t === "긴급") return `${stn}, ${sp} 교체 긴급합니다.`;
+        if (t === "교체") return `${stn}, ${sp} 교체 타이밍이 지났습니다.`;
+        return `${stn}, ${sp} 알람(${t})`;
+      }
 
-            if (aBtn) aBtn.addEventListener("click", function() {{
-              // ✅ 확인은 ACK 저장 + 닫기
-              addAck(pk);
-              closeOverlay(doc, pk);
-            }});
-          }}
+      function showCenteredNonBlockingModal(pk, message) {
+        const acked = getAcked();
+        if (acked.includes(pk)) {
+          log("skip acked pk=", pk);
+          return;
+        }
 
-          function handleAlarm(obj, fromEvent) {{
-            if (!obj || typeof obj !== "object") return;
-            const row = obj.row;
-            let pk  = String(obj.pk || "");
-            if (!row || typeof row !== "object") {{
-              log(fromEvent, "no row", obj);
-              return;
-            }}
+        const doc = W.document;
 
-            const t = String(row.type_alarm || "").trim().replaceAll(" ","");
-            if (!ALLOWED.has(t)) {{
-              log(fromEvent, "type not allowed:", t, row);
-              return;
-            }}
+        if (doc.getElementById(OVERLAY_ID_PREFIX + pk)) return;
 
-            if (!pk) {{
-              const id = row.id != null ? String(row.id) : "";
-              if (!id) {{
-                log(fromEvent, "no pk/id", row);
-                return;
-              }}
-              pk = id;
-            }}
+        removeExistingOverlays(doc);
 
-            showCenteredNonBlockingModal(pk, makeMessage(row));
-          }}
+        const overlay = doc.createElement("div");
+        overlay.id = OVERLAY_ID_PREFIX + pk;
+        overlay.style.cssText = `
+          position: fixed;
+          z-index: 2147483647;
+          left: 0; top: 0; width: 100%; height: 100%;
+          display: flex; align-items: center; justify-content: center;
+          background: rgba(0,0,0,0.0);
+          pointer-events: none;
+        `;
 
-          if (!W.__alarmSSE01) {{
-            W.__alarmSSE01 = {{ url: null, es: null }};
-          }}
+        const box = doc.createElement("div");
+        box.style.cssText = `
+          width: 62%;
+          max-width: 980px;
+          background: white;
+          border-radius: 14px;
+          padding: 18px 22px;
+          box-shadow: 0 10px 28px rgba(0,0,0,0.25);
+          font-family: sans-serif;
+          border-left: 10px solid #f2c94c;
+          pointer-events: auto;
+        `;
 
-          function start() {{
-            if (W.__alarmSSE01.es && W.__alarmSSE01.url === url) return;
+        box.innerHTML = `
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div style="font-size:22px; font-weight:800;">⚠️ 알람 발생</div>
+            <button id="alarmCloseX_${pk}" style="border:none;background:transparent;font-size:22px;cursor:pointer;">✕</button>
+          </div>
 
-            if (W.__alarmSSE01.es) {{
-              try {{ W.__alarmSSE01.es.close(); }} catch(e) {{}}
-              W.__alarmSSE01.es = null;
-            }}
+          <div style="margin-top:14px; padding:12px 14px; border-radius:10px;
+                      background:#fff9db; color:#5c4a00; font-size:16px;">
+            ${safeText(message)}
+          </div>
 
-            W.__alarmSSE01.url = url;
+          <div style="margin-top:16px; display:flex; gap:12px;">
+            <button id="alarmAckBtn_${pk}" style="flex:1; padding:10px 0; border-radius:10px;
+                    border:1px solid #ddd; background:white; cursor:pointer; font-size:15px;">
+              확인
+            </button>
+          </div>
 
-            log("connect:", url);
-            const es = new EventSource(url);
-            W.__alarmSSE01.es = es;
+          <div style="margin-top:10px; font-size:12px; color:#666;">
+            ※ 이 알람은 비차단 모달입니다. 뒤 화면 조작이 가능합니다.
+          </div>
+        `;
 
-            es.addEventListener("hello", (ev) => {{
-              log("hello", ev.data);
-            }});
+        overlay.appendChild(box);
+        doc.body.appendChild(overlay);
 
-            es.addEventListener("init", (ev) => {{
-              log("init", ev.data);
-              try {{
-                const obj = JSON.parse(ev.data || "{{}}");
-                if (obj && obj.row) handleAlarm(obj, "init");
-              }} catch(e) {{}}
-            }});
+        const xBtn = box.querySelector("#alarmCloseX_" + pk);
+        const aBtn = box.querySelector("#alarmAckBtn_" + pk);
 
-            es.addEventListener("alarm", (ev) => {{
-              log("alarm", ev.data);
-              try {{
-                const obj = JSON.parse(ev.data || "{{}}");
-                handleAlarm(obj, "alarm");
-              }} catch(e) {{}}
-            }});
+        if (xBtn) xBtn.addEventListener("click", function (ev) {
+          try { ev.preventDefault(); ev.stopPropagation(); } catch(e) {}
+          closeOverlay(doc, pk);
+        }, true);
 
-            es.addEventListener("error", (ev) => {{
-              log("error event", ev);
-            }});
-          }}
+        if (aBtn) aBtn.addEventListener("click", function (ev) {
+          try { ev.preventDefault(); ev.stopPropagation(); } catch(e) {}
+          addAck(pk);
+          closeOverlay(doc, pk);
+        }, true);
+      }
 
-          start();
-        }})();
-        </script>
-        """,
-        height=0,
-    )
+      function handleAlarm(obj, fromEvent) {
+        if (!obj || typeof obj !== "object") return;
+        const row = obj.row;
+        let pk = String(obj.pk || "");
+        if (!row || typeof row !== "object") {
+          log(fromEvent, "no row", obj);
+          return;
+        }
+
+        const t = String(row.type_alarm || "").trim().replaceAll(" ", "");
+        if (!ALLOWED.has(t)) {
+          log(fromEvent, "type not allowed:", t, row);
+          return;
+        }
+
+        if (!isRowInTargetScope(row)) {
+          const sc = computeScopeFromRow(row);
+          log("skip by scope mismatch", { target: { day: TARGET_DAY, shift: TARGET_SHIFT }, rowScope: sc, row });
+          return;
+        }
+
+        if (!pk) {
+          const id = (row.id != null) ? String(row.id) : "";
+          if (!id) {
+            log(fromEvent, "no pk/id", row);
+            return;
+          }
+          pk = id;
+        }
+
+        showCenteredNonBlockingModal(pk, makeMessage(row));
+      }
+
+      if (!W.__alarmSSE01) {
+        W.__alarmSSE01 = { url: null, es: null };
+      }
+
+      function start() {
+        if (W.__alarmSSE01.es && W.__alarmSSE01.url === url) return;
+
+        if (W.__alarmSSE01.es) {
+          try { W.__alarmSSE01.es.close(); } catch(e) {}
+          W.__alarmSSE01.es = null;
+        }
+
+        W.__alarmSSE01.url = url;
+
+        log("connect:", url, "target=", TARGET_DAY, TARGET_SHIFT);
+        const es = new EventSource(url);
+        W.__alarmSSE01.es = es;
+
+        es.addEventListener("hello", (ev) => {
+          log("hello", ev.data);
+        });
+
+        es.addEventListener("init", (ev) => {
+          log("init", ev.data);
+          try {
+            const obj = JSON.parse(ev.data || "{}");
+            if (obj && obj.row) handleAlarm(obj, "init");
+          } catch(e) {}
+        });
+
+        es.addEventListener("alarm", (ev) => {
+          log("alarm", ev.data);
+          try {
+            const obj = JSON.parse(ev.data || "{}");
+            handleAlarm(obj, "alarm");
+          } catch(e) {
+            log("alarm parse err", e);
+          }
+        });
+
+        es.addEventListener("error", (ev) => {
+          log("error event", ev);
+        });
+      }
+
+      start();
+    })();
+    </script>
+    """
+
+    # ✅ placeholder 치환(파이썬 f-string 사용 X)
+    js = js.replace("__URL__", js_url).replace("__DAY__", js_day).replace("__SHIFT__", js_shift)
+
+    components.html(js, height=0)
+
 
 # =========================================================
 # Alarm modal (기존 유지 - fallback)
@@ -1209,15 +1479,23 @@ def _planned_refresh_for_chart(end_day: str, shift: str) -> Dict[str, Any]:
 
 
 # =========================================================
+# ✅ Fragment decorator: snap=1이면 run_every 비활성
+# =========================================================
+def _frag_deco(run_every: Optional[int] = None):
+    if _is_snap() or (run_every is None):
+        return st.fragment
+    return lambda fn: st.fragment(fn, run_every=run_every)
+
+
+# =========================================================
 # fragments
 # =========================================================
-@st.fragment(run_every=SYNC_EVERY_SEC)
+@_frag_deco(SYNC_EVERY_SEC)
 def frag_sync_data(end_day: str, shift: str):
     if is_any_modal_open():
         return
 
     prev_tokens = dict(st.session_state.get("section_tokens", {}) or {})
-    prev_alarm_effective = str(st.session_state.get("alarm_token_effective", "") or "")
 
     t0 = time_mod.perf_counter()
     try:
@@ -1233,13 +1511,6 @@ def frag_sync_data(end_day: str, shift: str):
         return
 
     alarm_tok = str(latest_tokens.get("alarm", "") or "")
-    if not alarm_tok:
-        try:
-            latest_alarm = get_sections_latest(end_day, "day", timeout=float(SECTIONS_LATEST_TIMEOUT))
-            tok2 = (latest_alarm or {}).get("tokens", {}) if isinstance(latest_alarm, dict) else {}
-            alarm_tok = str(tok2.get("alarm", "") or "")
-        except Exception:
-            alarm_tok = ""
 
     nonop_changed = bool(prev_tokens) and (prev_tokens.get("nonop_detail") != latest_tokens.get("nonop_detail"))
     planned_changed = bool(prev_tokens) and (prev_tokens.get("planned") != latest_tokens.get("planned"))
@@ -1256,27 +1527,36 @@ def frag_sync_data(end_day: str, shift: str):
         _planned_reset_if_needed(end_day, shift)
         _planned_refresh_for_chart(end_day, shift)
 
-    # ✅ alarm fallback: 토큰 변화 조건 제거 (pk 기준)
+    # ✅ alarm fallback: 토큰 pk 기준 + ✅ scope 필터
     if alarm_tok and (not alarm_tok.startswith("__ERR__")):
         try:
             alarm_row = json.loads(alarm_tok)
+            if not isinstance(alarm_row, dict):
+                return
+
             t_alarm = str(alarm_row.get("type_alarm", "")).strip().replace(" ", "")
-            if t_alarm in ALARM_ALLOWED_TYPES:
-                pk = alarm_pk_from_token(alarm_row)
-                if pk not in st.session_state.seen_alarm_pks:
-                    msg = alarm_message(
-                        station=str(alarm_row.get("station", "")).strip(),
-                        sparepart=str(alarm_row.get("sparepart", "")).strip(),
-                        type_alarm=t_alarm,
-                    )
-                    if msg:
-                        st.session_state.pending_alarm_pk = pk
-                        st.session_state.pending_alarm_msg = msg
+            if t_alarm not in ALARM_ALLOWED_TYPES:
+                return
+
+            pd2, sh2 = alarm_scope_from_row(alarm_row)
+            if (pd2 != str(end_day)) or (sh2 != str(shift)):
+                return
+
+            pk = alarm_pk_from_token(alarm_row)
+            if pk not in st.session_state.seen_alarm_pks:
+                msg = alarm_message(
+                    station=str(alarm_row.get("station", "")).strip(),
+                    sparepart=str(alarm_row.get("sparepart", "")).strip(),
+                    type_alarm=t_alarm,
+                )
+                if msg:
+                    st.session_state.pending_alarm_pk = pk
+                    st.session_state.pending_alarm_msg = msg
         except Exception:
             pass
 
 
-@st.fragment
+@_frag_deco(None)
 def frag_alarm_once():
     pk = str(st.session_state.get("pending_alarm_pk", "") or "")
     msg = str(st.session_state.get("pending_alarm_msg", "") or "")
@@ -1287,13 +1567,12 @@ def frag_alarm_once():
         st.session_state.pending_alarm_msg = ""
         return
 
-    # fallback: 차단 모달(기존 유지)
     show_alarm_modal_no_rerun(msg, pk)
     st.session_state.pending_alarm_pk = ""
     st.session_state.pending_alarm_msg = ""
 
 
-@st.fragment(run_every=NONOP_EVERY_SEC)
+@_frag_deco(NONOP_EVERY_SEC)
 def frag_nonop_table(end_day: str, shift: str):
     c_title, c_unl = st.columns([3.2, 1.0])
     with c_title:
@@ -1473,7 +1752,7 @@ def frag_nonop_table(end_day: str, shift: str):
             st.session_state["nonop_lock_until_ts"] = 0.0
 
 
-@st.fragment(run_every=CHART_EVERY_SEC)
+@_frag_deco(CHART_EVERY_SEC)
 def frag_chart(end_day: str, shift: str):
     if is_any_modal_open():
         return
@@ -1572,7 +1851,7 @@ def frag_chart(end_day: str, shift: str):
     st.pyplot(fig, clear_figure=True)
 
 
-@st.fragment
+@_frag_deco(None)
 def frag_worker_manual(end_day: str, shift: str):
     st.subheader("작업자 정보")
 
@@ -1673,7 +1952,7 @@ def frag_worker_manual(end_day: str, shift: str):
             st.rerun()
 
 
-@st.fragment
+@_frag_deco(None)
 def frag_master_manual(end_day: str, shift: str):
     st.subheader("mastersample test")
 
@@ -1736,8 +2015,9 @@ def frag_master_manual(end_day: str, shift: str):
 # =========================================================
 # Header buttons
 # =========================================================
-def render_header_buttons(end_day: str, shift: str):
-    b1, b2, b3, b4 = st.columns(4)
+def render_header_buttons(end_day: str, shift: str, snap_mode: bool = False):
+    # ✅ "계획정지시간" 옆에 "생산 비정상 STOP" 추가 (요청사항)
+    b1, b2, b3, b4, b5 = st.columns([1, 1, 1, 1, 1.25])
 
     def _open_modal(which: str):
         st.session_state["active_modal"] = which
@@ -1781,6 +2061,79 @@ def render_header_buttons(end_day: str, shift: str):
     if b4.button("계획정지시간", use_container_width=True, key="btn_header_planned"):
         _open_modal("planned")
 
+    # ✅ (요청 2) 버튼 위 문구 제거 + (요청 1) 실행/대기/완료 표시
+    with b5:
+        if "prod_abnormal_stop_last" not in st.session_state:
+            st.session_state.prod_abnormal_stop_last = {"done": False, "ok": None, "ts": "", "ms": 0.0, "msg": ""}
+
+        last = st.session_state.get("prod_abnormal_stop_last", {}) or {}
+        done = bool(last.get("done", False))
+        ok = last.get("ok", None)
+
+        disabled = bool(snap_mode)  # snap=1(인쇄 캡처)에서는 재귀 실행/DOM 변동 방지
+        if disabled:
+            st.button("생산 비정상 STOP", use_container_width=True, disabled=True, key=SNAPSHOT_BTN_KEY + "_disabled")
+            st.info("snap=1(PDF) 모드에서는 비활성입니다.")
+            return
+
+        status_slot = st.empty()
+
+        # 상태 표시(직전 결과)
+        if done and ok is True:
+            status_slot.success("완료")
+        elif done and ok is False:
+            status_slot.error("실패")
+        else:
+            status_slot.caption("")
+
+        if st.button("생산 비정상 STOP", use_container_width=True, key=SNAPSHOT_BTN_KEY):
+            # 즉시 상태 갱신
+            status_slot.warning("완료되기 전까지 대기하세요")
+
+            with st.spinner("생산 비정상 STOP 실행 중..."):
+                res = _run_production_abnormal_stop()
+
+            # ✅ ok 판정 강화:
+            # - ok=True면 성공
+            # - ok가 없더라도 error/trace 없고 stderr에 "Traceback" 없으면 성공으로 간주(실제 발송은 됐는데 ok가 비어있는 경우 방지)
+            stderr_txt = str(res.get("stderr", "") or "")
+            trace_txt = str(res.get("trace", "") or "")
+            err_txt = str(res.get("error", "") or "")
+
+            ok_raw = res.get("ok", None)
+            ok2 = bool(ok_raw) if ok_raw is not None else None
+
+            if ok2 is None:
+                has_tb = ("Traceback" in stderr_txt) or ("Traceback" in trace_txt)
+                ok2 = (not err_txt) and (not has_tb)
+
+            # 결과 저장 + 표시
+            ts = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            msg = f"ok={ok2} / {float(res.get('ms', 0.0) or 0.0):.0f}ms"
+
+            st.session_state.prod_abnormal_stop_last = {
+                "done": True,
+                "ok": bool(ok2),
+                "ts": ts,
+                "ms": float(res.get("ms", 0.0) or 0.0),
+                "msg": msg,
+                "stderr": stderr_txt[-2000:],
+                "stdout": str(res.get("stdout", "") or "")[-2000:],
+                "error": err_txt,
+                "trace": trace_txt[-4000:],
+            }
+
+            if ok2:
+                status_slot.success("완료")
+                st.success(f"✅ 생산 비정상 STOP 완료 ({ts})")
+            else:
+                status_slot.error("실패")
+                st.error(f"❌ 생산 비정상 STOP 실패 ({ts}): {err_txt}")
+                with st.expander("에러 상세(log)", expanded=False):
+                    if stderr_txt:
+                        st.code(stderr_txt[-8000:], language="text")
+                    if trace_txt:
+                        st.code(trace_txt[-8000:], language="text")
 
 # =========================================================
 # Modals (st.dialog)
@@ -1935,7 +2288,9 @@ def render_modals(end_day: str, shift: str):
                     rr = r or {}
                     items.append(
                         {
-                            "barcode_information": "" if rr.get("barcode_information") is None else str(rr.get("barcode_information") or ""),
+                            "barcode_information": ""
+                            if rr.get("barcode_information") is None
+                            else str(rr.get("barcode_information") or ""),
                             "pn": "" if rr.get("pn") is None else str(rr.get("pn") or ""),
                             "remark": "" if rr.get("remark") is None else str(rr.get("remark") or ""),
                         }
@@ -1976,7 +2331,12 @@ def render_modals(end_day: str, shift: str):
                     st.session_state[f"bc_rem_{i}"] = ""
                     st.rerun()
 
-                c[1].text_input(label=f"barcode_information_{i}", key=f"bc_info_{i}", label_visibility="collapsed", placeholder="예) 18번째 문자 값")
+                c[1].text_input(
+                    label=f"barcode_information_{i}",
+                    key=f"bc_info_{i}",
+                    label_visibility="collapsed",
+                    placeholder="예) 18번째 문자 값",
+                )
                 c[2].text_input(label=f"pn_{i}", key=f"bc_pn_{i}", label_visibility="collapsed", placeholder="예) 123-ABC")
                 c[3].text_input(label=f"remark_{i}", key=f"bc_rem_{i}", label_visibility="collapsed", placeholder="비고")
 
@@ -2164,11 +2524,13 @@ def render_modals(end_day: str, shift: str):
 
 
 # =========================================================
-# App start
+# App start (✅ snap=1: query-param 기준 고정 + SSE/close_modal rerun 차단)
 # =========================================================
 st.set_page_config(page_title="실시간 Dash board", layout="wide")
 inject_no_dim_fade_keep_loading()
 inject_no_dim_fade_keep_loading()
+
+SNAP = _is_snap()
 
 if "seen_alarm_pks" not in st.session_state:
     st.session_state.seen_alarm_pks = set()
@@ -2200,16 +2562,67 @@ for mk in ("modal_email_need_load", "modal_barcode_need_load", "modal_planned_ne
     if mk not in st.session_state:
         st.session_state[mk] = True
 
-_handle_close_modal_param()
+# ✅ snap=1이면 “모달/락/저장중” 상태를 렌더 시작 전에 강제 정리
+if SNAP:
+    st.session_state["active_modal"] = ""
+    st.session_state["modal_email"] = False
+    st.session_state["modal_barcode"] = False
+    st.session_state["modal_planned"] = False
+    st.session_state["modal_email_need_load"] = False
+    st.session_state["modal_barcode_need_load"] = False
+    st.session_state["modal_planned_need_load"] = False
+    st.session_state["nonop_lock_until_ts"] = 0.0
+    st.session_state["nonop_is_saving"] = False
+    st.session_state["nonop_view_limit"] = NONOP_VIEW_DEFAULT
 
+# ✅ close_modal: 운영 모드만 rerun, snap=1은 파라미터만 제거
+if SNAP:
+    try:
+        if _qparam_has("close_modal"):
+            try:
+                st.query_params.pop("close_modal")
+            except Exception:
+                pass
+            components.html(
+                """
+                <script>
+                  (function(){
+                    try{
+                      const url = new URL(window.parent.location.href);
+                      if (url.searchParams.has("close_modal")) {
+                        url.searchParams.delete("close_modal");
+                        window.parent.history.replaceState({}, "", url.toString());
+                      }
+                    }catch(e){}
+                  })();
+                </script>
+                """,
+                height=0,
+            )
+    except Exception:
+        pass
+else:
+    _handle_close_modal_param()
+
+# ✅ 날짜/교대 결정:
+# - 운영: 현재시각 기반
+# - snap=1: query param(prod_day, shift_type) 기준 고정
 dt_now = now_kst()
-shift = detect_shift(dt_now)
-end_day = dt_now.strftime("%Y%m%d")
+if SNAP:
+    end_day = normalize_day_yyyymmdd(_qparam_get("prod_day", "")) or dt_now.strftime("%Y%m%d")
+    shift = str(_qparam_get("shift_type", "day") or "day").strip().lower()
+    if shift not in ("day", "night"):
+        shift = "day"
+else:
+    shift = detect_shift(dt_now)
+    end_day = dt_now.strftime("%Y%m%d")
+
 weekday_kr = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"][dt_now.weekday()]
 shift_kr = "주간" if shift == "day" else "야간"
 
-# ✅ 01 페이지도 SSE 알람 구독(현재 시각 기준)
-_mount_alarm_sse(end_day, shift)
+# ✅ SSE 알람 구독은 운영 모드만
+if not SNAP:
+    _mount_alarm_sse(end_day, shift)
 
 _nonop_reset_if_needed(end_day, shift)
 _planned_reset_if_needed(end_day, shift)
@@ -2221,30 +2634,35 @@ if st.session_state.get("last_shift") != shift:
     st.session_state.worker_rows_cache = None
     st.session_state.master_rows_cache = None
 
-try:
-    q = st.query_params
-    ack_pk = q.get("ack_alarm_pk", "")
-    if ack_pk:
-        st.session_state.seen_alarm_pks.add(str(ack_pk))
-        try:
-            st.query_params.pop("ack_alarm_pk", None)
-        except Exception:
-            pass
-        _clear_ack_param_in_browser()
-except Exception:
-    pass
+# ✅ ack param은 운영 모드만 처리
+if not SNAP:
+    try:
+        q = st.query_params
+        ack_pk = q.get("ack_alarm_pk", "")
+        if ack_pk:
+            st.session_state.seen_alarm_pks.add(str(ack_pk))
+            try:
+                st.query_params.pop("ack_alarm_pk", None)
+            except Exception:
+                pass
+            _clear_ack_param_in_browser()
+    except Exception:
+        pass
 
 h1, h2 = st.columns([3, 2])
 with h1:
     st.markdown(f"## {dt_now:%Y-%m-%d} {weekday_kr} {shift_kr} 생산 현황")
 with h2:
-    render_header_buttons(end_day, shift)
+    # ✅ "계획정지시간" 옆에 "생산 비정상 STOP" 버튼 추가
+    render_header_buttons(end_day, shift, snap_mode=SNAP)
 
 st.divider()
 
+# ✅ 데이터 동기화/알람(운영 모드: 주기 동작 / snap=1: 1회 렌더)
 frag_sync_data(end_day, shift)
 frag_alarm_once()
 
+# ✅ 모달/워치독
 render_modals(end_day, shift)
 _inject_modal_dom_watchdog()
 
@@ -2267,3 +2685,16 @@ with st.expander("PERF LOG (최근)", expanded=False):
         st.dataframe(pd.DataFrame(logs).tail(40), use_container_width=True, hide_index=True)
     else:
         st.caption("로그 없음")
+
+# ✅ print-to-pdf 안정화용 ready 마커 (snapshot_mailer에서 기다릴 수 있음)
+if SNAP:
+    st.markdown('<div id="snap-ready" data-snap-ready="1"></div>', unsafe_allow_html=True)
+
+import streamlit.components.v1 as components
+
+def _snap_mark_ready():
+    # 스냅샷이든 아니든 넣어도 문제없음 (height=0)
+    components.html('<div id="__snap_ready__" style="display:none">READY</div>', height=0)
+
+# ... 모든 차트/데이터프레임 렌더링이 끝난 다음:
+_snap_mark_ready()

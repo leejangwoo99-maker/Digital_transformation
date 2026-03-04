@@ -657,3 +657,16 @@ def get_report_i_planned_stop_time(prod_day: str, shift_type: str) -> Any:
 
 def get_report_i_non_time(prod_day: str, shift_type: str) -> Any:
     return _report_get("/report/i_non_time/{prod_day}", prod_day, shift_type)
+
+def get_demon_health_latest(*, limit: int = 200, timeout: float = 6.0) -> List[dict]:
+    res = _req(
+        "GET",
+        "/demon_health/latest",
+        params={"limit": int(limit)},
+        timeout=float(timeout),
+        retries=1,
+    )
+    # 서버가 list로 주면 그대로, dict로 감싸주면 _extract_rows
+    if isinstance(res, list):
+        return res
+    return _extract_rows(res)
