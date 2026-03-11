@@ -1,4 +1,3 @@
-<img width="986" height="377" alt="image" src="https://github.com/user-attachments/assets/d2e4f974-329e-4afc-aa9e-8694c3bedc66" />Digital transformation for the manufacturing line
 1.The preprocessed data was stored in a DB server, then mined for machine learning training, and finally visualized using Streamlit.
 2.According to 사양서 & Architecture, the characteristics of the files are indicated.
 3. 'app' folder -> FastAPI Framework + Streamlit.
