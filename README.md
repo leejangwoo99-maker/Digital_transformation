@@ -2,10 +2,11 @@
 
 2. According to 사양서 & Architecture, the characteristics of the files are indicated.
 
-3. 'app' folder -> FastAPI Framework + Streamlit.
+3. Others are jupyter notebooks related to the data mining and demon programs.
 
-4. Others are jupyter notebooks related to the data mining and demon programs.
-   Specially, 134_inspect_anomal_patter_rev3.ipynb and LigthGBM_modle_save.ipynb are the Machine learning Algorithm.
+4. Applied Machine learning algorithms are Euclidean Distance, Cosine Similarity and LightGBM.
+
+5. 'app' folder is FastAPI Framework + Streamlit.
 
 6. If want to know the details, search for the details from the link below.
 
