@@ -9,5 +9,6 @@
 5. 'app' folder is FastAPI Framework + Streamlit.
 
 6. If want to know the details, search for the details from the link below.
-
    https://serious-ambert-bc0.notion.site/APTIV-31d8bc55235b80f58ecff4b949efdbdf?source=copy_link
+
+FYI, demon & back-end & streamlit are compiled by Nuitka.
