@@ -7,7 +7,7 @@ total_non_operation_time_realtime.py
 2) 주/야간 window는 조회 범위용이 아니라 "분류용"으로만 사용
 3) 기존 row 수정 없음, 새 비가동은 무조건 새 row insert 전제
 4) reason / sparepart 는 SOURCE에서 읽지 않음
-5) Streamlit이 Back_end_i_daily_report.total_non_operation_time 에 직접 입력/수정
+5) Streamlit이 i_daily_report.total_non_operation_time 에 직접 입력/수정
 6) UPSERT 시 기존 reason / sparepart 는 절대 덮어쓰지 않음
 7) WRITE(UPSERT) / WRITE(LOG) 분리
 8) Heartbeat 1분 1회, DB 로그 최소화
@@ -21,9 +21,14 @@ total_non_operation_time_realtime.py
 - 겹치는 시간이 동일하면 day
 - 분류 기준은 source의 end_day + from_time + to_time
 
-주의
-- 본 코드는 SOURCE 테이블(fct_non_operation_time / vision_non_operation_time)에 created_at 컬럼이 있다고 가정
-- target unique key는 (source_table, end_day, station, from_ts)
+추가 반영
+- SOURCE에서 no_operation_time >= 300초 인 행만 조회
+- work_mem 기본값 16MB
+- worker 분리:
+  1) FCT reader
+  2) VISION reader
+  3) LOG worker
+- UPSERT writer는 별도 유지
 """
 
 from __future__ import annotations
@@ -53,7 +58,7 @@ SRC_SCHEMA = "g_production_film"
 SRC_FCT_TABLE = "fct_non_operation_time"
 SRC_VISION_TABLE = "vision_non_operation_time"
 
-DST_SCHEMA = "Back_end_i_daily_report"
+DST_SCHEMA = "i_daily_report"
 DST_TABLE = "total_non_operation_time"
 
 LOG_SCHEMA = "k_demon_heath_check"
@@ -64,13 +69,14 @@ DAY_START = dtime(8, 30, 0)
 NIGHT_START = dtime(20, 30, 0)
 
 STATEMENT_TIMEOUT_MS = 30_000
-DEFAULT_WORK_MEM = "4MB"
+DEFAULT_WORK_MEM = "16MB"
 
 QUEUE_MAX = 20_000
 SIG_CACHE_MAX = 300_000
+LOG_QUEUE_MAX = 10_000
 
-# created_at 경계 중복/지연 방지
 LOOKBACK_SEC = 3
+MIN_NO_OPERATION_SEC = 300
 
 DB_CONFIG = {
     "host": os.getenv("PGHOST", "100.105.75.47"),
@@ -109,7 +115,7 @@ def _ts() -> str:
 
 def log(level: str, msg: str):
     lvl = (level or "info").lower()
-    line = Demon_f"{_ts()} [{lvl}] {msg}"
+    line = f"{_ts()} [{lvl}] {msg}"
     print(line, flush=True)
     _append_local_log(line)
 
@@ -144,13 +150,13 @@ def connect_blocking(role: str):
                 keepalives_idle=30,
                 keepalives_interval=10,
                 keepalives_count=3,
-                application_name=Demon_f"total_nonop_{role.lower()}",
+                application_name=f"total_nonop_{role.lower()}",
             )
             conn.autocommit = (role == "WRITE")
 
             cur = conn.cursor()
-            cur.execute(Demon_f"SET work_mem = '{work_mem}';")
-            cur.execute(Demon_f"SET statement_timeout = '{int(STATEMENT_TIMEOUT_MS)}';")
+            cur.execute(f"SET work_mem = '{work_mem}';")
+            cur.execute(f"SET statement_timeout = '{int(STATEMENT_TIMEOUT_MS)}';")
             cur.close()
 
             cur = conn.cursor()
@@ -160,13 +166,13 @@ def connect_blocking(role: str):
 
             log(
                 "info",
-                Demon_f"[DB] connected ({role}) host={DB_CONFIG['host']}:{DB_CONFIG['port']} "
-                Demon_f"work_mem={work_mem} stmt_timeout={STATEMENT_TIMEOUT_MS}ms"
+                f"[DB] connected ({role}) host={DB_CONFIG['host']}:{DB_CONFIG['port']} "
+                f"work_mem={work_mem} stmt_timeout={STATEMENT_TIMEOUT_MS}ms"
             )
             return conn
 
         except Exception as e:
-            log("down", Demon_f"[DB][RETRY] connect({role}) failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+            log("down", f"[DB][RETRY] connect({role}) failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
             time_mod.sleep(SLEEP_SEC)
 
 
@@ -182,7 +188,7 @@ def _close_silent(conn):
 # DDL ensure
 # =========================
 def ensure_target_table(write_conn):
-    ddl = Demon_f"""
+    ddl = f"""
     CREATE SCHEMA IF NOT EXISTS {DST_SCHEMA};
 
     CREATE TABLE IF NOT EXISTS {DST_SCHEMA}.{DST_TABLE} (
@@ -245,7 +251,7 @@ def ensure_target_table(write_conn):
 
 
 def ensure_progress_table(write_conn):
-    ddl = Demon_f"""
+    ddl = f"""
     CREATE SCHEMA IF NOT EXISTS {LOG_SCHEMA};
 
     CREATE TABLE IF NOT EXISTS {LOG_SCHEMA}.{LOG_TABLE} (
@@ -284,7 +290,7 @@ def ensure_progress_table(write_conn):
 
 
 def ensure_state_table(write_conn):
-    ddl = Demon_f"""
+    ddl = f"""
     CREATE SCHEMA IF NOT EXISTS {LOG_SCHEMA};
 
     CREATE TABLE IF NOT EXISTS {LOG_SCHEMA}.{STATE_TABLE} (
@@ -321,18 +327,25 @@ def ensure_state_table(write_conn):
 
 
 # =========================
-# Progress logger
+# Async DB log worker
 # =========================
-class ProgressLogger:
-    def __init__(self, name: str):
-        self.name = name
-        self.conn = None
+@dataclass
+class LogItem:
+    level: str
+    phase: str
+    src: Optional[str]
+    message: str
+    win_start: Optional[datetime] = None
+    win_end: Optional[datetime] = None
+    fetched_rows: Optional[int] = None
+    upsert_rows: Optional[int] = None
+    bad_rows: Optional[int] = None
+    skipped_rows: Optional[int] = None
 
-    def connect(self):
-        _close_silent(self.conn)
-        self.conn = connect_blocking("WRITE")
-        ensure_progress_table(self.conn)
-        log("info", Demon_f"[LOG] logger connected ({self.name})")
+
+class AsyncDbLogger:
+    def __init__(self, q_out: "queue.Queue[LogItem]"):
+        self.q_out = q_out
 
     def write(
         self,
@@ -347,56 +360,86 @@ class ProgressLogger:
         bad_rows: Optional[int] = None,
         skipped_rows: Optional[int] = None,
     ):
-        while True:
-            try:
-                if self.conn is None or getattr(self.conn, "closed", 1) != 0:
-                    self.connect()
+        item = LogItem(
+            level=(level or "info").lower(),
+            phase=phase,
+            src=src,
+            message=message,
+            win_start=win_start,
+            win_end=win_end,
+            fetched_rows=fetched_rows,
+            upsert_rows=upsert_rows,
+            bad_rows=bad_rows,
+            skipped_rows=skipped_rows,
+        )
+        try:
+            self.q_out.put_nowait(item)
+        except queue.Full:
+            log("warn", f"[LOG][DROP] queue full phase={phase} src={src}")
 
-                cur = self.conn.cursor()
-                cur.execute(
-                    Demon_f"""
-                    INSERT INTO {LOG_SCHEMA}.{LOG_TABLE} (
-                        level, phase, src, message,
-                        window_start_ts, window_end_ts,
-                        fetched_rows, upsert_rows, bad_rows, skipped_rows
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        (level or "info").lower(),
-                        phase,
-                        src,
-                        message,
-                        win_start,
-                        win_end,
-                        fetched_rows,
-                        upsert_rows,
-                        bad_rows,
-                        skipped_rows,
-                    ),
-                )
-                cur.close()
-                return
 
-            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-                log("down", Demon_f"[LOG][RETRY][{self.name}] connection lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
-                _close_silent(self.conn)
-                self.conn = None
-                time_mod.sleep(SLEEP_SEC)
+def log_worker_main(
+    q_log: "queue.Queue[LogItem]",
+    stop_evt: threading.Event,
+):
+    log("info", "[BOOT] log_worker start")
 
-            except Exception as e:
-                pgerr = ""
+    write_conn = connect_blocking("WRITE")
+    ensure_progress_table(write_conn)
+
+    while not stop_evt.is_set():
+        try:
+            item = q_log.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
+        try:
+            while True:
                 try:
-                    pgerr = getattr(e, "pgerror", "") or ""
-                except Exception:
-                    pass
-                log("down", Demon_f"[LOG][RETRY][{self.name}] insert failed -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)} {pgerr}")
-                _close_silent(self.conn)
-                self.conn = None
-                time_mod.sleep(SLEEP_SEC)
+                    if write_conn is None or getattr(write_conn, "closed", 1) != 0:
+                        write_conn = connect_blocking("WRITE")
+                        ensure_progress_table(write_conn)
 
-    def close(self):
-        _close_silent(self.conn)
-        self.conn = None
+                    cur = write_conn.cursor()
+                    cur.execute(
+                        f"""
+                        INSERT INTO {LOG_SCHEMA}.{LOG_TABLE} (
+                            level, phase, src, message,
+                            window_start_ts, window_end_ts,
+                            fetched_rows, upsert_rows, bad_rows, skipped_rows
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            item.level,
+                            item.phase,
+                            item.src,
+                            item.message,
+                            item.win_start,
+                            item.win_end,
+                            item.fetched_rows,
+                            item.upsert_rows,
+                            item.bad_rows,
+                            item.skipped_rows,
+                        ),
+                    )
+                    cur.close()
+                    break
+
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    log("down", f"[LOG][RETRY] conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+                    _close_silent(write_conn)
+                    write_conn = None
+                    time_mod.sleep(SLEEP_SEC)
+
+                except Exception as e:
+                    log("down", f"[LOG][RETRY] insert failed -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+                    _close_silent(write_conn)
+                    write_conn = None
+                    time_mod.sleep(SLEEP_SEC)
+        finally:
+            q_log.task_done()
+
+    _close_silent(write_conn)
 
 
 # =========================
@@ -488,11 +531,6 @@ def _overlap_seconds(a_start: datetime, a_end: datetime, b_start: datetime, b_en
 
 
 def classify_shift_by_overlap(end_day_text: str, from_time_text: Any, to_time_text: Any) -> Tuple[Optional[str], Optional[str], Optional[datetime], Optional[datetime]]:
-    """
-    row 1건을 day/night 중 어디에 귀속할지 판단
-    - 더 많이 겹친 shift 귀속
-    - 동률이면 day
-    """
     from_dt, to_dt = make_from_to_dt(end_day_text, from_time_text, to_time_text)
     if from_dt is None or to_dt is None:
         return None, None, None, None
@@ -531,8 +569,6 @@ def classify_shift_by_overlap(end_day_text: str, from_time_text: Any, to_time_te
 
 # =========================
 # Sig cache
-# - lookback으로 같은 row를 다시 읽을 수 있으므로
-#   source unique + created_at 조합으로 중복 enqueue 축소
 # =========================
 class SigCache:
     def __init__(self, max_size: int):
@@ -563,7 +599,7 @@ class WatermarkStore:
     def load_from_db(self, write_conn):
         ensure_state_table(write_conn)
         cur = write_conn.cursor()
-        cur.execute(Demon_f"SELECT src_table, last_created_at FROM {LOG_SCHEMA}.{STATE_TABLE}")
+        cur.execute(f"SELECT src_table, last_created_at FROM {LOG_SCHEMA}.{STATE_TABLE}")
         rows = cur.fetchall()
         cur.close()
 
@@ -594,7 +630,7 @@ def persist_watermark(write_conn, src_table: str, last_created_at: datetime):
         try:
             cur = write_conn.cursor()
             cur.execute(
-                Demon_f"""
+                f"""
                 INSERT INTO {LOG_SCHEMA}.{STATE_TABLE} (src_table, last_created_at)
                 VALUES (%s, %s)
                 ON CONFLICT (src_table)
@@ -611,14 +647,14 @@ def persist_watermark(write_conn, src_table: str, last_created_at: datetime):
             return
 
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            log("down", Demon_f"[DB][RETRY] persist_watermark conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+            log("down", f"[DB][RETRY] persist_watermark conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
             _close_silent(write_conn)
             time_mod.sleep(SLEEP_SEC)
             write_conn = connect_blocking("WRITE")
             ensure_state_table(write_conn)
 
         except Exception as e:
-            log("down", Demon_f"[DB][RETRY] persist_watermark failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+            log("down", f"[DB][RETRY] persist_watermark failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
             time_mod.sleep(SLEEP_SEC)
 
 
@@ -626,7 +662,7 @@ def persist_watermark(write_conn, src_table: str, last_created_at: datetime):
 # SQL
 # =========================
 def make_incremental_scan_sql(src_table: str) -> str:
-    return Demon_f"""
+    return f"""
     SELECT
         end_day,
         station,
@@ -635,16 +671,15 @@ def make_incremental_scan_sql(src_table: str) -> str:
         created_at
     FROM {SRC_SCHEMA}.{src_table}
     WHERE created_at >= %s
+      AND COALESCE(no_operation_time, 0) >= %s
     ORDER BY created_at ASC, end_day ASC, station ASC, from_time ASC, to_time ASC
     """
 
 
 # =========================
 # Upsert
-# - reason/sparepart는 insert 때 NULL
-# - conflict update 때 절대 건드리지 않음
 # =========================
-UPSERT_SQL = Demon_f"""
+UPSERT_SQL = f"""
 INSERT INTO {DST_SCHEMA}.{DST_TABLE} (
     source_table, end_day, prod_day, shift_type, station, from_ts, to_ts, reason, sparepart
 ) VALUES (
@@ -679,7 +714,7 @@ def upsert_batch_keepfirst(write_conn, rows: List[dict]):
             return len(rows), 0
 
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            log("down", Demon_f"[DB][RETRY] upsert conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+            log("down", f"[DB][RETRY] upsert conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
             _close_silent(write_conn)
             time_mod.sleep(SLEEP_SEC)
             write_conn = connect_blocking("WRITE")
@@ -718,7 +753,7 @@ def upsert_batch_keepfirst(write_conn, rows: List[dict]):
                             write_conn.rollback()
                     except Exception:
                         pass
-                    log("down", Demon_f"[DB][RETRY] upsert row conn lost -> reconnect in {SLEEP_SEC}s | {type(ee).__name__}: {repr(ee)}")
+                    log("down", f"[DB][RETRY] upsert row conn lost -> reconnect in {SLEEP_SEC}s | {type(ee).__name__}: {repr(ee)}")
                     _close_silent(write_conn)
                     time_mod.sleep(SLEEP_SEC)
                     write_conn = connect_blocking("WRITE")
@@ -732,7 +767,7 @@ def upsert_batch_keepfirst(write_conn, rows: List[dict]):
                             write_conn.rollback()
                     except Exception:
                         pass
-                    log("down", Demon_f"[DB][RETRY] upsert row failed -> retry in {SLEEP_SEC}s | {type(ee).__name__}: {repr(ee)}")
+                    log("down", f"[DB][RETRY] upsert row failed -> retry in {SLEEP_SEC}s | {type(ee).__name__}: {repr(ee)}")
                     time_mod.sleep(SLEEP_SEC)
                     retry_break = True
                     break
@@ -743,7 +778,7 @@ def upsert_batch_keepfirst(write_conn, rows: List[dict]):
             return up_ok, skipped
 
         except Exception as e:
-            log("down", Demon_f"[DB][RETRY] upsert failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+            log("down", f"[DB][RETRY] upsert failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
             time_mod.sleep(SLEEP_SEC)
 
 
@@ -777,7 +812,7 @@ def stream_select(read_conn, sql: str, params: Tuple, fetchmany_rows: int):
             return
 
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            log("down", Demon_f"[DB][RETRY] stream_select conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
+            log("down", f"[DB][RETRY] stream_select conn lost -> reconnect in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)}")
             _close_silent(read_conn)
             time_mod.sleep(SLEEP_SEC)
             read_conn = connect_blocking("READ")
@@ -794,7 +829,7 @@ def stream_select(read_conn, sql: str, params: Tuple, fetchmany_rows: int):
             except Exception:
                 pass
 
-            log("down", Demon_f"[DB][RETRY] stream_select failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)} {pgerr}")
+            log("down", f"[DB][RETRY] stream_select failed -> retry in {SLEEP_SEC}s | {type(e).__name__}: {repr(e)} {pgerr}")
             time_mod.sleep(SLEEP_SEC)
             _close_silent(read_conn)
             read_conn = connect_blocking("READ")
@@ -817,37 +852,116 @@ class UpsertItem:
 
 
 # =========================
-# Reader
+# Reader helpers
 # =========================
 def _initial_watermark(now: datetime) -> datetime:
-    """
-    state가 없을 때 초기 시작점
-    - 현재 활성 shift 시작시각 - LOOKBACK
-    """
     win = compute_window(now)
     return win.start_ts - timedelta(seconds=LOOKBACK_SEC)
 
 
-def reader_main(
+def scan_source_once(
+    src_table: str,
+    src_tag: str,
+    wm_store: WatermarkStore,
+    sig_cache: SigCache,
+    now: datetime,
+):
+    read_conn = connect_blocking("READ")
+    try:
+        last_wm = wm_store.get(src_table)
+        if last_wm is None:
+            last_wm = _initial_watermark(now)
+
+        query_from = last_wm - timedelta(seconds=LOOKBACK_SEC)
+        sql = make_incremental_scan_sql(src_table)
+        params = (query_from, MIN_NO_OPERATION_SEC)
+
+        changed_rows: List[dict] = []
+        fetched = 0
+        bad = 0
+        skipped = 0
+        max_created_at: Optional[datetime] = None
+        win_start_for_log: Optional[datetime] = None
+        win_end_for_log: Optional[datetime] = None
+
+        for cols, rows in stream_select(read_conn, sql, params, FETCH_MANY_ROWS):
+            idx = {c: i for i, c in enumerate(cols)}
+            fetched += len(rows)
+
+            for row in rows:
+                end_day = str(row[idx["end_day"]])
+                station = str(row[idx["station"]])
+                created_at = row[idx["created_at"]]
+
+                if created_at is not None:
+                    if max_created_at is None or created_at > max_created_at:
+                        max_created_at = created_at
+
+                prod_day, shift_type, from_dt, to_dt = classify_shift_by_overlap(
+                    end_day,
+                    row[idx["from_time"]],
+                    row[idx["to_time"]],
+                )
+                if from_dt is None or to_dt is None or prod_day is None or shift_type is None:
+                    bad += 1
+                    continue
+
+                key = (src_table, end_day, station, from_dt, to_dt)
+                sig = (created_at,)
+
+                if not sig_cache.upsert_if_changed(key, sig):
+                    skipped += 1
+                    continue
+
+                if win_start_for_log is None or from_dt < win_start_for_log:
+                    win_start_for_log = from_dt
+                if win_end_for_log is None or to_dt > win_end_for_log:
+                    win_end_for_log = to_dt
+
+                changed_rows.append(
+                    {
+                        "source_table": src_table,
+                        "end_day": end_day,
+                        "prod_day": prod_day,
+                        "shift_type": shift_type,
+                        "station": station,
+                        "from_ts": from_dt.isoformat(),
+                        "to_ts": to_dt.isoformat(),
+                    }
+                )
+
+        return {
+            "src_table": src_table,
+            "src_tag": src_tag,
+            "rows": changed_rows,
+            "fetched": fetched,
+            "bad": bad,
+            "skipped": skipped,
+            "max_created_at": max_created_at,
+            "win_start": win_start_for_log,
+            "win_end": win_end_for_log,
+            "query_from": query_from,
+        }
+    finally:
+        _close_silent(read_conn)
+
+
+# =========================
+# FCT reader
+# =========================
+def fct_reader_main(
     q_out: "queue.Queue[UpsertItem]",
+    q_log: "queue.Queue[LogItem]",
     stop_evt: threading.Event,
     wm_store: WatermarkStore,
 ):
-    log("info", "[BOOT] reader start")
-
-    read_conn = connect_blocking("READ")
-    logger = ProgressLogger("reader")
-    logger.connect()
-
+    logger = AsyncDbLogger(q_log)
     sig_cache = SigCache(SIG_CACHE_MAX)
-
-    sources = [
-        (SRC_FCT_TABLE, "FCT"),
-        (SRC_VISION_TABLE, "VISION"),
-    ]
 
     heartbeat_last = 0.0
     scan_log_last = 0.0
+
+    log("info", "[BOOT] fct_reader start")
 
     while not stop_evt.is_set():
         now_ts = time_mod.time()
@@ -856,125 +970,148 @@ def reader_main(
 
         if now_ts - heartbeat_last >= 60:
             heartbeat_last = now_ts
-            hb_msg = Demon_f"reader alive queue_size={q_out.qsize()} active={active_win.prod_day}/{active_win.shift_type}"
-            log("info", Demon_f"[HEARTBEAT] {hb_msg}")
-            logger.write("info", "HEARTBEAT", "READER", hb_msg, active_win.start_ts, active_win.end_ts)
+            hb_msg = f"fct_reader alive queue_size={q_out.qsize()} active={active_win.prod_day}/{active_win.shift_type}"
+            log("info", f"[HEARTBEAT] {hb_msg}")
+            logger.write("info", "HEARTBEAT", "FCT_READER", hb_msg, active_win.start_ts, active_win.end_ts)
 
-        total_fetched = 0
-        total_bad = 0
-        total_changed = 0
-        total_skipped = 0
+        try:
+            result = scan_source_once(
+                src_table=SRC_FCT_TABLE,
+                src_tag="FCT",
+                wm_store=wm_store,
+                sig_cache=sig_cache,
+                now=now,
+            )
 
-        for (src_table, src_tag) in sources:
-            last_wm = wm_store.get(src_table)
-            if last_wm is None:
-                last_wm = _initial_watermark(now)
-
-            query_from = last_wm - timedelta(seconds=LOOKBACK_SEC)
-            sql = make_incremental_scan_sql(src_table)
-            params = (query_from,)
-
-            changed_rows: List[dict] = []
-            fetched = 0
-            bad = 0
-            skipped = 0
-            max_created_at: Optional[datetime] = None
-            win_start_for_log: Optional[datetime] = None
-            win_end_for_log: Optional[datetime] = None
-
-            for cols, rows in stream_select(read_conn, sql, params, FETCH_MANY_ROWS):
-                idx = {c: i for i, c in enumerate(cols)}
-                fetched += len(rows)
-
-                for row in rows:
-                    end_day = str(row[idx["end_day"]])
-                    station = str(row[idx["station"]])
-                    created_at = row[idx["created_at"]]
-
-                    if created_at is not None:
-                        if max_created_at is None or created_at > max_created_at:
-                            max_created_at = created_at
-
-                    prod_day, shift_type, from_dt, to_dt = classify_shift_by_overlap(
-                        end_day,
-                        row[idx["from_time"]],
-                        row[idx["to_time"]],
-                    )
-                    if from_dt is None or to_dt is None or prod_day is None or shift_type is None:
-                        bad += 1
-                        continue
-
-                    # lookback 재조회 중복 방지
-                    key = (src_table, end_day, station, from_dt, to_dt)
-                    sig = (created_at,)
-
-                    if not sig_cache.upsert_if_changed(key, sig):
-                        skipped += 1
-                        continue
-
-                    if win_start_for_log is None or from_dt < win_start_for_log:
-                        win_start_for_log = from_dt
-                    if win_end_for_log is None or to_dt > win_end_for_log:
-                        win_end_for_log = to_dt
-
-                    changed_rows.append(
-                        {
-                            "source_table": src_table,
-                            "end_day": end_day,
-                            "prod_day": prod_day,
-                            "shift_type": shift_type,
-                            "station": station,
-                            "from_ts": from_dt.strftime("%Y-%m-%d %H:%M:%S.%Demon_f_mining+09:00"),
-                            "to_ts": to_dt.strftime("%Y-%m-%d %H:%M:%S.%Demon_f_mining+09:00"),
-                        }
-                    )
-
-            total_fetched += fetched
-            total_bad += bad
-            total_changed += len(changed_rows)
-            total_skipped += skipped
-
-            if changed_rows:
-                for i in range(0, len(changed_rows), UPSERT_BATCH_ROWS):
-                    chunk = changed_rows[i:i + UPSERT_BATCH_ROWS]
+            rows = result["rows"]
+            if rows:
+                for i in range(0, len(rows), UPSERT_BATCH_ROWS):
+                    chunk = rows[i:i + UPSERT_BATCH_ROWS]
                     q_out.put(
                         UpsertItem(
-                            src_table=src_table,
-                            src_tag=src_tag,
+                            src_table=result["src_table"],
+                            src_tag=result["src_tag"],
                             rows=chunk,
-                            fetched=fetched,
-                            bad=bad,
-                            skipped=skipped,
-                            max_created_at=max_created_at,
-                            win_start=win_start_for_log,
-                            win_end=win_end_for_log,
+                            fetched=result["fetched"],
+                            bad=result["bad"],
+                            skipped=result["skipped"],
+                            max_created_at=result["max_created_at"],
+                            win_start=result["win_start"],
+                            win_end=result["win_end"],
                         )
                     )
 
-        if total_changed > 0 or (now_ts - scan_log_last >= 60):
-            scan_log_last = now_ts
-            total_msg = (
-                Demon_f"scan_total fetched={total_fetched} changed={total_changed} "
-                Demon_f"bad={total_bad} skipped={total_skipped} queue_size={q_out.qsize()}"
-            )
-            log("info", Demon_f"[SCAN][TOTAL] {total_msg}")
-            logger.write(
-                "info",
-                "SCAN_TOTAL",
-                "ALL",
-                total_msg,
-                active_win.start_ts,
-                active_win.end_ts,
-                fetched_rows=total_fetched,
-                upsert_rows=total_changed,
-                bad_rows=total_bad,
-                skipped_rows=total_skipped,
-            )
+            if len(rows) > 0 or (now_ts - scan_log_last >= 60):
+                scan_log_last = now_ts
+                total_msg = (
+                    f"scan src=FCT fetched={result['fetched']} changed={len(rows)} "
+                    f"bad={result['bad']} skipped={result['skipped']} queue_size={q_out.qsize()}"
+                )
+                log("info", f"[SCAN] {total_msg}")
+                logger.write(
+                    "info",
+                    "SCAN_SRC",
+                    "FCT",
+                    total_msg,
+                    active_win.start_ts,
+                    active_win.end_ts,
+                    fetched_rows=result["fetched"],
+                    upsert_rows=len(rows),
+                    bad_rows=result["bad"],
+                    skipped_rows=result["skipped"],
+                )
+
+        except Exception as e:
+            err = f"fct_reader failed | {type(e).__name__}: {repr(e)}"
+            log("down", f"[SCAN][ERR] {err}")
+            logger.write("down", "SCAN_ERR", "FCT", err)
+            time_mod.sleep(SLEEP_SEC)
 
         time_mod.sleep(SLEEP_SEC)
 
-    _close_silent(read_conn)
-    logger.close()
+
+# =========================
+# VISION reader
+# =========================
+def vision_reader_main(
+    q_out: "queue.Queue[UpsertItem]",
+    q_log: "queue.Queue[LogItem]",
+    stop_evt: threading.Event,
+    wm_store: WatermarkStore,
+):
+    logger = AsyncDbLogger(q_log)
+    sig_cache = SigCache(SIG_CACHE_MAX)
+
+    heartbeat_last = 0.0
+    scan_log_last = 0.0
+
+    log("info", "[BOOT] vision_reader start")
+
+    while not stop_evt.is_set():
+        now_ts = time_mod.time()
+        now = datetime.now()
+        active_win = compute_window(now)
+
+        if now_ts - heartbeat_last >= 60:
+            heartbeat_last = now_ts
+            hb_msg = f"vision_reader alive queue_size={q_out.qsize()} active={active_win.prod_day}/{active_win.shift_type}"
+            log("info", f"[HEARTBEAT] {hb_msg}")
+            logger.write("info", "HEARTBEAT", "VISION_READER", hb_msg, active_win.start_ts, active_win.end_ts)
+
+        try:
+            result = scan_source_once(
+                src_table=SRC_VISION_TABLE,
+                src_tag="VISION",
+                wm_store=wm_store,
+                sig_cache=sig_cache,
+                now=now,
+            )
+
+            rows = result["rows"]
+            if rows:
+                for i in range(0, len(rows), UPSERT_BATCH_ROWS):
+                    chunk = rows[i:i + UPSERT_BATCH_ROWS]
+                    q_out.put(
+                        UpsertItem(
+                            src_table=result["src_table"],
+                            src_tag=result["src_tag"],
+                            rows=chunk,
+                            fetched=result["fetched"],
+                            bad=result["bad"],
+                            skipped=result["skipped"],
+                            max_created_at=result["max_created_at"],
+                            win_start=result["win_start"],
+                            win_end=result["win_end"],
+                        )
+                    )
+
+            if len(rows) > 0 or (now_ts - scan_log_last >= 60):
+                scan_log_last = now_ts
+                total_msg = (
+                    f"scan src=VISION fetched={result['fetched']} changed={len(rows)} "
+                    f"bad={result['bad']} skipped={result['skipped']} queue_size={q_out.qsize()}"
+                )
+                log("info", f"[SCAN] {total_msg}")
+                logger.write(
+                    "info",
+                    "SCAN_SRC",
+                    "VISION",
+                    total_msg,
+                    active_win.start_ts,
+                    active_win.end_ts,
+                    fetched_rows=result["fetched"],
+                    upsert_rows=len(rows),
+                    bad_rows=result["bad"],
+                    skipped_rows=result["skipped"],
+                )
+
+        except Exception as e:
+            err = f"vision_reader failed | {type(e).__name__}: {repr(e)}"
+            log("down", f"[SCAN][ERR] {err}")
+            logger.write("down", "SCAN_ERR", "VISION", err)
+            time_mod.sleep(SLEEP_SEC)
+
+        time_mod.sleep(SLEEP_SEC)
 
 
 # =========================
@@ -982,6 +1119,7 @@ def reader_main(
 # =========================
 def writer_main(
     q_in: "queue.Queue[UpsertItem]",
+    q_log: "queue.Queue[LogItem]",
     stop_evt: threading.Event,
     wm_store: WatermarkStore,
 ):
@@ -991,8 +1129,7 @@ def writer_main(
     ensure_target_table(write_conn)
     ensure_state_table(write_conn)
 
-    logger = ProgressLogger("writer")
-    logger.connect()
+    logger = AsyncDbLogger(q_log)
 
     heartbeat_last = 0.0
     summary_last = 0.0
@@ -1010,18 +1147,18 @@ def writer_main(
 
         if now_ts - heartbeat_last >= 60:
             heartbeat_last = now_ts
-            hb_msg = Demon_f"writer alive queue_size={q_in.qsize()}"
-            log("info", Demon_f"[HEARTBEAT] {hb_msg}")
+            hb_msg = f"writer alive queue_size={q_in.qsize()}"
+            log("info", f"[HEARTBEAT] {hb_msg}")
             logger.write("info", "HEARTBEAT", "WRITER", hb_msg)
 
         if now_ts - summary_last >= 60:
             summary_last = now_ts
             if agg_batches > 0:
                 msg = (
-                    Demon_f"writer_summary batches={agg_batches} upserted={agg_up_ok} "
-                    Demon_f"skipped={agg_skipped} fetched={agg_fetched} bad={agg_bad} queue_size={q_in.qsize()}"
+                    f"writer_summary batches={agg_batches} upserted={agg_up_ok} "
+                    f"skipped={agg_skipped} fetched={agg_fetched} bad={agg_bad} queue_size={q_in.qsize()}"
                 )
-                log("info", Demon_f"[UPSERT][SUMMARY] {msg}")
+                log("info", f"[UPSERT][SUMMARY] {msg}")
                 logger.write(
                     "info",
                     "UPSERT_SUMMARY",
@@ -1050,7 +1187,6 @@ def writer_main(
         try:
             up_ok, skipped_keepfirst = upsert_batch_keepfirst(write_conn, item.rows)
 
-            # watermark는 write 성공 후에만 전진
             if item.max_created_at is not None:
                 wm_store.set(item.src_table, item.max_created_at)
                 persist_watermark(write_conn, item.src_table, item.max_created_at)
@@ -1064,8 +1200,8 @@ def writer_main(
             last_win_end = item.win_end
 
         except Exception as e:
-            err_msg = Demon_f"{type(e).__name__}: {repr(e)}"
-            log("down", Demon_f"[UPSERT][ERR] {err_msg}")
+            err_msg = f"{type(e).__name__}: {repr(e)}"
+            log("down", f"[UPSERT][ERR] {err_msg}")
             logger.write(
                 "down",
                 "UPSERT_ERR",
@@ -1080,10 +1216,10 @@ def writer_main(
 
     if agg_batches > 0:
         msg = (
-            Demon_f"writer_summary batches={agg_batches} upserted={agg_up_ok} "
-            Demon_f"skipped={agg_skipped} fetched={agg_fetched} bad={agg_bad} queue_size={q_in.qsize()}"
+            f"writer_summary batches={agg_batches} upserted={agg_up_ok} "
+            f"skipped={agg_skipped} fetched={agg_fetched} bad={agg_bad} queue_size={q_in.qsize()}"
         )
-        log("info", Demon_f"[UPSERT][SUMMARY] {msg}")
+        log("info", f"[UPSERT][SUMMARY] {msg}")
         logger.write(
             "info",
             "UPSERT_SUMMARY",
@@ -1098,7 +1234,6 @@ def writer_main(
         )
 
     _close_silent(write_conn)
-    logger.close()
 
 
 # =========================
@@ -1107,15 +1242,17 @@ def writer_main(
 def main():
     _ensure_local_log_dir()
 
-    log("info", Demon_f"[BOOT] start (READ=1, WRITE_UPSERT=1, WRITE_LOG_READER=1, WRITE_LOG_WRITER=1) interval={SLEEP_SEC}s")
-    log("info", Demon_f"[CONF] SOURCE=({SRC_SCHEMA}.{SRC_FCT_TABLE}, {SRC_SCHEMA}.{SRC_VISION_TABLE})")
-    log("info", Demon_f"[CONF] TARGET(i)={DST_SCHEMA}.{DST_TABLE} | LOG(k)={LOG_SCHEMA}.{LOG_TABLE} | STATE(k)={LOG_SCHEMA}.{STATE_TABLE}")
+    log("info", "[BOOT] start")
+    log("info", f"[CONF] SOURCE=({SRC_SCHEMA}.{SRC_FCT_TABLE}, {SRC_SCHEMA}.{SRC_VISION_TABLE})")
+    log("info", f"[CONF] TARGET(i)={DST_SCHEMA}.{DST_TABLE} | LOG(k)={LOG_SCHEMA}.{LOG_TABLE} | STATE(k)={LOG_SCHEMA}.{STATE_TABLE}")
     log("info", "[CONF] polling=created_at incremental only")
     log("info", "[CONF] classify=overlap_majority(day_vs_night), tie=>day")
     log("info", "[CONF] source_reason_sparepart=ignored")
-    log("info", Demon_f"[CONF] lookback={LOOKBACK_SEC}s")
+    log("info", f"[CONF] lookback={LOOKBACK_SEC}s")
+    log("info", f"[CONF] min_no_operation_time={MIN_NO_OPERATION_SEC}s")
+    log("info", f"[CONF] default_work_mem={DEFAULT_WORK_MEM}")
+    log("info", "[CONF] workers=FCT reader + VISION reader + LOG worker + UPSERT writer")
 
-    # 초기 DDL 보장 + state load
     w = connect_blocking("WRITE")
     ensure_target_table(w)
     ensure_progress_table(w)
@@ -1125,18 +1262,22 @@ def main():
     wm_store.load_from_db(w)
     _close_silent(w)
 
-    boot_logger = ProgressLogger("boot")
-    boot_logger.connect()
-    boot_logger.write("info", "BOOT", None, "daemon booted")
-    boot_logger.close()
-
     q_upsert: "queue.Queue[UpsertItem]" = queue.Queue(maxsize=QUEUE_MAX)
+    q_log: "queue.Queue[LogItem]" = queue.Queue(maxsize=LOG_QUEUE_MAX)
     stop_evt = threading.Event()
 
-    th_r = threading.Thread(target=reader_main, args=(q_upsert, stop_evt, wm_store), daemon=True)
-    th_w = threading.Thread(target=writer_main, args=(q_upsert, stop_evt, wm_store), daemon=True)
-    th_r.start()
-    th_w.start()
+    boot_logger = AsyncDbLogger(q_log)
+    boot_logger.write("info", "BOOT", None, "daemon booted")
+
+    th_log = threading.Thread(target=log_worker_main, args=(q_log, stop_evt), daemon=True)
+    th_fct = threading.Thread(target=fct_reader_main, args=(q_upsert, q_log, stop_evt, wm_store), daemon=True)
+    th_vis = threading.Thread(target=vision_reader_main, args=(q_upsert, q_log, stop_evt, wm_store), daemon=True)
+    th_wri = threading.Thread(target=writer_main, args=(q_upsert, q_log, stop_evt, wm_store), daemon=True)
+
+    th_log.start()
+    th_fct.start()
+    th_vis.start()
+    th_wri.start()
 
     try:
         while True:
@@ -1151,6 +1292,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        log("error", Demon_f"fatal: {type(e).__name__}: {e}")
+        log("error", f"fatal: {type(e).__name__}: {e}")
         _append_local_log(traceback.format_exc())
         raise
