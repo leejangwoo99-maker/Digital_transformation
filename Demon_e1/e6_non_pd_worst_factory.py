@@ -15,7 +15,7 @@ non_pd_worst.py
 
 Nuitka 안정화(중요)
 - list/dict/set comprehension 최대한 제거
-- Demon_f_mining-string 내 복잡식/inline comp 제거
+- f-string 내 복잡식/inline comp 제거
 
 [추가 통합 반영]
 1) TARGET_END_DAY를 "현재 날짜(YYYYMMDD)" 기준으로 자동 선택

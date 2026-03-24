@@ -664,7 +664,7 @@ def load_source_month(engine, stations: list[str], run_month: str) -> pd.DataFra
       AND remark IN ('PD','Non-PD')
       AND step_description = :step_desc
       AND COALESCE(result,'') <> 'FAIL'
-      AND substring(regexp_replace(COALESCE(end_day::text,''), '\\D', '', 'Demon_g') from 1 for 6) = :run_month
+      AND substring(regexp_replace(COALESCE(end_day::text,''), '\\D', '', 'g') from 1 for 6) = :run_month
     ORDER BY end_day ASC, end_time ASC
     """
     df = _read_sql_blocking(
@@ -909,7 +909,7 @@ def main():
                 }
                 if min_last is not None:
                     extra_where = """
-                      AND ( (regexp_replace(COALESCE(end_day::text,''), '\\D', '', 'Demon_g') || ' ' || COALESCE(end_time::text,''))::timestamp > :min_last )
+                      AND ( (regexp_replace(COALESCE(end_day::text,''), '\\D', '', 'g') || ' ' || COALESCE(end_time::text,''))::timestamp > :min_last )
                     """
                     params["min_last"] = str(min_last)
 
@@ -927,7 +927,7 @@ def main():
                   AND remark IN ('PD','Non-PD')
                   AND step_description = :step_desc
                   AND COALESCE(result,'') <> 'FAIL'
-                  AND substring(regexp_replace(COALESCE(end_day::text,''), '\\D', '', 'Demon_g') from 1 for 6) = :run_month
+                  AND substring(regexp_replace(COALESCE(end_day::text,''), '\\D', '', 'g') from 1 for 6) = :run_month
                   {extra_where}
                 ORDER BY end_day ASC, end_time ASC
                 LIMIT :limit
