@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-h_timing_spareparts_v9_3_backfill_then_realtime_logdb.py
-============================================================
+h_timing_spareparts_v9_4_backfill_then_realtime_logdb_recover.py
+================================================================
 목표
-- (REPL) Back_end_i_daily_report.total_non_operation_time(to_ts) 기반으로 구간을 나눠서
+- (REPL) i_daily_report.total_non_operation_time(to_ts) 기반으로 구간을 나눠서
   기존 데이터(과거)부터 처리(backfill)한 뒤, 실시간으로 계속 추적한다.
 
 핵심 규칙
@@ -16,36 +16,14 @@ h_timing_spareparts_v9_3_backfill_then_realtime_logdb.py
 5) 테이블은 DROP 금지. 1회성 CREATE/ALTER/INDEX만 수행.
 6) backlog 처리 시에는 sleep 최소화(adaptive loop)
 
-주의
-- backfill을 하면 alarm_record.end_day/end_time은 과거(TEST end_ts)가 들어가고,
-  created_at은 현재(inspect 시각)가 들어간다.
-
-[v9.2 FIX]
-- 교체(next_repl_end_ts)가 있는데 그 사이에 테스트가 없으면(ts_list empty)
-  기존 로직은 ROLL이 영원히 안 되어 다음 사이클(교체 이후)을 집계하지 못함.
-- 해결:
-  1) now >= next_repl_end_ts 이면 upper_ts=next_repl_end_ts로 고정
-  2) ts_list가 비어도 now >= next_repl_end_ts이면 ROLL 수행
-
-[v9.2 추가 FIX]
-- "확률이 기준 이상일 때만 알람 저장"을 위해
-  준비/권고 알람은 pass_prob=True일 때만 insert_alarm 수행.
-
-[v9.3 추가]
-- 실행 로그를 DB에도 저장:
-  schema: k_demon_heath_check (없으면 생성)
-  table : h_log (없으면 생성)
-
-[중요 변경]
-- REPL 소스:
-  g_production_film.fct_non_operation_time(end_day,to_time) -> Back_end_i_daily_report.total_non_operation_time(to_ts)
-- to_ts는 timestamptz(오프셋-aware) 이므로, 코드 전체를 "aware datetime(KST)"로 통일
-
-[이번 요청 반영 - alarm_record 중복 방지]
-- alarm_record에서 (end_day, end_time, station, sparepart) 가 같으면 "중복 INSERT 불가"
-- 방법:
-  1) UNIQUE INDEX 생성(없으면 생성)
-  2) insert_alarm 을 ON CONFLICT(...) DO UPDATE로 변경 (즉, 행은 1개만 유지)
+[v9.4 운영 안정화]
+- 인터넷/네트워크 단절 후 stale psycopg2 connection 복구 강화
+- 메인 업무용 connection 과 DB 로그 적재용 connection 분리
+- log() 호출 때마다 즉시 DB flush 하지 않음
+- 루프마다 ping_db() 수행 후 실패 시 재연결
+- psycopg2 keepalive 옵션 추가
+- flush_db_logs() 에서 pandas 제거
+- sleep(0) 제거 -> 0.2초
 """
 
 from __future__ import annotations
@@ -58,7 +36,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
 
@@ -71,7 +48,7 @@ DB_CONFIG = {
     "port": 5432,
     "dbname": "postgres",
     "user": "postgres",
-    "password": "",  # 비번은 보완 사항
+    "password": "",
 }
 
 KST = ZoneInfo("Asia/Seoul")
@@ -79,16 +56,20 @@ KST = ZoneInfo("Asia/Seoul")
 STATIONS = ["FCT1", "FCT2", "FCT3", "FCT4"]
 SPAREPARTS = ["usb_a", "usb_c", "mini_b"]
 
-# REPL(교체 이력) 소스 변경
-REPL_SCHEMA = "Back_end_i_daily_report"
+REPL_SCHEMA = "i_daily_report"
 REPL_TABLE = "total_non_operation_time"
 REPL_EXCLUDE_STATIONS = ("Vision1", "Vision2")
 
 LOOP_INTERVAL_SEC = 5
+IMMEDIATE_SLEEP_SEC = 0.2
 BATCH_LIMIT_TEST_ROWS = 5000
 
+LOG_FLUSH_INTERVAL_SEC = 5
+LOG_FLUSH_BATCH_SIZE = 1000
+PING_INTERVAL_SEC = 10
+
 SESSION_GUARDS_SQL = """
-SET application_name = 'h_timing_spareparts_v9_3_logdb';
+SET application_name = 'h_timing_spareparts_v9_4_logdb_recover';
 SET statement_timeout = '30s';
 SET lock_timeout = '5s';
 SET idle_in_transaction_session_timeout = '30s';
@@ -112,27 +93,20 @@ ALARM_TABLE = "alarm_record"
 STATE_SCHEMA = "h_machine_learning"
 STATE_TABLE = "sparepart_interval_state_rt_v9_2"
 
-# DB 로그 저장 대상
 LOG_SCHEMA = "k_demon_heath_check"
 LOG_TABLE = "h_log"
 
-# 메모리 버퍼(DB 다운 시 로그 유실 방지)
 PENDING_DB_LOGS: List[Tuple[str, str, str, str]] = []
 
 
 # =================================================
-# 1) TIME UTIL (aware 통일)
+# 1) TIME UTIL
 # =================================================
 def now_kst() -> datetime:
     return datetime.now(tz=KST)
 
 
 def ensure_aware_kst(dt: Optional[datetime]) -> Optional[datetime]:
-    """
-    - None => None
-    - naive => KST로 로컬라이즈(운영 DB가 KST 기준으로 기록된다는 가정)
-    - aware => KST로 변환
-    """
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -158,8 +132,8 @@ def _normalize_info(info: str) -> str:
 
 def _make_log_row(info: str, contents: str, now: Optional[datetime] = None) -> Tuple[str, str, str, str]:
     d = now or now_kst()
-    end_day = d.strftime("%Y%m%d")  # yyyymmdd
-    end_time = d.strftime("%H:%M:%S")  # hh:mi:ss
+    end_day = d.strftime("%Y%m%d")
+    end_time = d.strftime("%H:%M:%S")
     return end_day, end_time, _normalize_info(info), str(contents)
 
 
@@ -170,6 +144,79 @@ def print_log(msg: str) -> None:
 
 def enqueue_db_log(info: str, contents: str) -> None:
     PENDING_DB_LOGS.append(_make_log_row(info, contents))
+
+
+def log(msg: str, info: str = "info") -> None:
+    print_log(msg)
+    enqueue_db_log(info, msg)
+
+
+# =================================================
+# 3) DB UTIL
+# =================================================
+def safe_close(conn: Optional[psycopg2.extensions.connection]) -> None:
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
+
+
+def ping_db(conn: Optional[psycopg2.extensions.connection]) -> bool:
+    try:
+        if conn is None or conn.closed != 0:
+            return False
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return True
+    except Exception:
+        return False
+
+
+def connect_once(app_name: str) -> psycopg2.extensions.connection:
+    conn = psycopg2.connect(
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"],
+        dbname=DB_CONFIG["dbname"],
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"],
+        connect_timeout=5,
+        keepalives=1,
+        keepalives_idle=10,
+        keepalives_interval=5,
+        keepalives_count=3,
+        application_name=app_name,
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(SESSION_GUARDS_SQL)
+        cur.execute("SELECT 1")
+        cur.fetchone()
+    return conn
+
+
+def connect_forever_main() -> psycopg2.extensions.connection:
+    while True:
+        try:
+            conn = connect_once("h_timing_spareparts_v9_4_main")
+            print_log("[OK] MAIN DB connected")
+            return conn
+        except Exception as e:
+            print_log(f"[ERROR] MAIN DB connect failed: {type(e).__name__}: {e}")
+            time.sleep(2)
+
+
+def connect_forever_log() -> psycopg2.extensions.connection:
+    while True:
+        try:
+            conn = connect_once("h_timing_spareparts_v9_4_log")
+            ensure_log_table(conn)
+            print_log("[OK] LOG DB connected")
+            return conn
+        except Exception as e:
+            print_log(f"[ERROR] LOG DB connect failed: {type(e).__name__}: {e}")
+            time.sleep(2)
 
 
 def has_schema(conn, schema: str) -> bool:
@@ -183,104 +230,6 @@ def ensure_schema(conn, schema: str) -> None:
     if not has_schema(conn, schema):
         with conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema};")
-
-
-def ensure_log_table(conn) -> None:
-    ensure_schema(conn, LOG_SCHEMA)
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {LOG_SCHEMA}.{LOG_TABLE} (
-                id BIGSERIAL PRIMARY KEY,
-                end_day  TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                info     TEXT NOT NULL,
-                contents TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            """
-        )
-        cur.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{LOG_TABLE}_day_time "
-            f"ON {LOG_SCHEMA}.{LOG_TABLE} (end_day, end_time);"
-        )
-        cur.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{LOG_TABLE}_info "
-            f"ON {LOG_SCHEMA}.{LOG_TABLE} (info);"
-        )
-
-
-def flush_db_logs(conn, max_batch: int = 1000) -> None:
-    """
-    end_day, end_time, info, contents 순서로 DataFrame화 후 저장.
-    """
-    if not PENDING_DB_LOGS:
-        return
-
-    rows = PENDING_DB_LOGS[:max_batch]
-    df = pd.DataFrame(rows, columns=["end_day", "end_time", "info", "contents"])
-    values = [tuple(x) for x in df[["end_day", "end_time", "info", "contents"]].to_records(index=False)]
-
-    sql = f"""
-    INSERT INTO {LOG_SCHEMA}.{LOG_TABLE}
-      (end_day, end_time, info, contents)
-    VALUES %s
-    """
-
-    with conn.cursor() as cur:
-        execute_values(cur, sql, values, page_size=500)
-
-    del PENDING_DB_LOGS[: len(rows)]
-
-
-def log(msg: str, info: str = "info", conn: Optional[psycopg2.extensions.connection] = None) -> None:
-    """
-    콘솔 출력 + DB 로그 버퍼 적재.
-    conn이 가능하면 즉시 flush 시도.
-    """
-    info_n = _normalize_info(info)
-    print_log(msg)
-    enqueue_db_log(info_n, msg)
-
-    if conn is not None and conn.closed == 0:
-        try:
-            flush_db_logs(conn)
-        except Exception:
-            pass
-
-
-# =================================================
-# 3) DB UTIL
-# =================================================
-def connect_forever() -> psycopg2.extensions.connection:
-    while True:
-        try:
-            conn = psycopg2.connect(
-                host=DB_CONFIG["host"],
-                port=DB_CONFIG["port"],
-                dbname=DB_CONFIG["dbname"],
-                user=DB_CONFIG["user"],
-                password=DB_CONFIG["password"],
-                connect_timeout=5,
-            )
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(SESSION_GUARDS_SQL)
-
-            ensure_log_table(conn)
-            log("[OK] DB connected", info="info", conn=conn)
-            return conn
-        except Exception as e:
-            log(f"[ERROR] DB connect failed: {type(e).__name__}: {e}", info="error", conn=None)
-            time.sleep(2)
-
-
-def safe_close(conn: Optional[psycopg2.extensions.connection]) -> None:
-    try:
-        if conn is not None:
-            conn.close()
-    except Exception:
-        pass
 
 
 def has_column(conn, schema: str, table: str, column: str) -> bool:
@@ -312,12 +261,64 @@ def get_column_udt(conn, schema: str, table: str, column: str) -> Optional[str]:
 
 
 # =================================================
-# 4) ONE-TIME DDL (NO DROP)
+# 4) LOG TABLE / FLUSH
+# =================================================
+def ensure_log_table(conn) -> None:
+    ensure_schema(conn, LOG_SCHEMA)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {LOG_SCHEMA}.{LOG_TABLE} (
+                id BIGSERIAL PRIMARY KEY,
+                end_day  TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                info     TEXT NOT NULL,
+                contents TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{LOG_TABLE}_day_time "
+            f"ON {LOG_SCHEMA}.{LOG_TABLE} (end_day, end_time);"
+        )
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{LOG_TABLE}_info "
+            f"ON {LOG_SCHEMA}.{LOG_TABLE} (info);"
+        )
+
+
+def flush_db_logs(log_conn: Optional[psycopg2.extensions.connection], max_batch: int = LOG_FLUSH_BATCH_SIZE) -> Optional[psycopg2.extensions.connection]:
+    if not PENDING_DB_LOGS:
+        return log_conn
+
+    if log_conn is None or not ping_db(log_conn):
+        safe_close(log_conn)
+        log_conn = connect_forever_log()
+
+    rows = PENDING_DB_LOGS[:max_batch]
+    sql = f"""
+    INSERT INTO {LOG_SCHEMA}.{LOG_TABLE}
+      (end_day, end_time, info, contents)
+    VALUES %s
+    """
+    try:
+        with log_conn.cursor() as cur:
+            execute_values(cur, sql, rows, page_size=500)
+        del PENDING_DB_LOGS[: len(rows)]
+        return log_conn
+    except Exception as e:
+        print_log(f"[WARN] flush_db_logs failed: {type(e).__name__}: {e}")
+        safe_close(log_conn)
+        return None
+
+
+# =================================================
+# 5) ONE-TIME DDL
 # =================================================
 def ensure_tables(conn) -> None:
     ensure_schema(conn, ALARM_SCHEMA)
     ensure_schema(conn, STATE_SCHEMA)
-    ensure_log_table(conn)
 
     with conn.cursor() as cur:
         cur.execute(f"""
@@ -368,9 +369,6 @@ def ensure_tables(conn) -> None:
             with conn.cursor() as cur:
                 cur.execute(f"ALTER TABLE {ALARM_SCHEMA}.{ALARM_TABLE} ADD COLUMN {col} {ddl};")
 
-    # ✅ (핵심) 중복 방지 UNIQUE INDEX: (end_day, end_time, station, sparepart)
-    # - 이미 데이터가 중복되어 있으면 생성이 실패할 수 있음.
-    #   그 경우 먼저 중복 정리(최신 id만 남기기) 후 재시도 필요.
     with conn.cursor() as cur:
         cur.execute(
             f"""
@@ -387,11 +385,11 @@ def ensure_tables(conn) -> None:
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_alarm_runid ON {ALARM_SCHEMA}.{ALARM_TABLE} (run_id);")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_state_updated ON {STATE_SCHEMA}.{STATE_TABLE} (updated_at DESC);")
 
-    log("[OK] ensure_tables done (NO DROP)", info="info", conn=conn)
+    log("[OK] ensure_tables done (NO DROP)")
 
 
 # =================================================
-# 5) MODEL
+# 6) MODEL
 # =================================================
 def detect_model_blob_column(conn) -> Optional[str]:
     sql = """
@@ -487,7 +485,7 @@ def predict_proba_1(model: Any, X: List[List[float]]) -> float:
 
 
 # =================================================
-# 6) LIFE(p25)
+# 7) LIFE(p25)
 # =================================================
 def load_life_p25_map(conn) -> Dict[str, float]:
     sql = f"""
@@ -510,7 +508,7 @@ def load_life_p25_map(conn) -> Dict[str, float]:
 
 
 # =================================================
-# 7) POLICY
+# 8) POLICY
 # =================================================
 def policy_by_ratio(ratio: float) -> Tuple[Optional[str], float]:
     if ratio < 0.3:
@@ -532,7 +530,7 @@ def alarm_rank(t: Optional[str]) -> int:
 
 
 # =================================================
-# 8) INSERT ALARM (중복 방지 UPSERT)
+# 9) INSERT ALARM
 # =================================================
 def insert_alarm(
     conn,
@@ -549,12 +547,9 @@ def insert_alarm(
     reset_repl_ts: Optional[datetime],
 ) -> None:
     evt = round_dt_to_sec(event_end_ts)
-    end_day_str = evt.strftime("%Y-%m-%d")   # 기존 유지 (alarm_record end_day 포맷)
+    end_day_str = evt.strftime("%Y-%m-%d")
     end_time_str = evt.strftime("%H:%M:%S")
 
-    # ✅ 핵심: (end_day, end_time, station, sparepart) 동일이면 INSERT가 아니라 UPDATE
-    # - “중복 insert 금지” 요건 충족(행은 1개만 유지)
-    # - 재시도/네트워크 단절에도 멱등(idempotent)
     sql = f"""
     INSERT INTO {ALARM_SCHEMA}.{ALARM_TABLE}
       (end_day, end_time, station, sparepart, type_alarm, amount, min_prob, created_at,
@@ -563,14 +558,14 @@ def insert_alarm(
             %s,%s,%s,%s)
     ON CONFLICT (end_day, end_time, station, sparepart)
     DO UPDATE SET
-        type_alarm   = EXCLUDED.type_alarm,
-        amount       = EXCLUDED.amount,
-        min_prob     = EXCLUDED.min_prob,
-        created_at   = EXCLUDED.created_at,
-        run_id       = EXCLUDED.run_id,
-        algo_ver     = EXCLUDED.algo_ver,
-        reset_reason = EXCLUDED.reset_reason,
-        reset_repl_ts= EXCLUDED.reset_repl_ts
+        type_alarm    = EXCLUDED.type_alarm,
+        amount        = EXCLUDED.amount,
+        min_prob      = EXCLUDED.min_prob,
+        created_at    = EXCLUDED.created_at,
+        run_id        = EXCLUDED.run_id,
+        algo_ver      = EXCLUDED.algo_ver,
+        reset_reason  = EXCLUDED.reset_reason,
+        reset_repl_ts = EXCLUDED.reset_repl_ts
     """
 
     with conn.cursor() as cur:
@@ -594,7 +589,7 @@ def insert_alarm(
 
 
 # =================================================
-# 9) FEATURES
+# 10) FEATURES
 # =================================================
 def build_features_for_model(
     model: Any,
@@ -620,7 +615,7 @@ def build_features_for_model(
 
 
 # =================================================
-# 10) STATE
+# 11) STATE
 # =================================================
 @dataclass
 class State:
@@ -695,20 +690,17 @@ def save_state(conn, st: State) -> None:
 
 
 # =================================================
-# 11) QUERIES
+# 12) QUERIES
 # =================================================
 def preflight_required_columns(conn) -> None:
-    # REPL (Back_end_i_daily_report.total_non_operation_time)
     require_column(conn, REPL_SCHEMA, REPL_TABLE, "station")
     require_column(conn, REPL_SCHEMA, REPL_TABLE, "sparepart")
     require_column(conn, REPL_SCHEMA, REPL_TABLE, "to_ts")
 
-    # TEST
     require_column(conn, TEST_SCHEMA, TEST_TABLE, "end_day")
     require_column(conn, TEST_SCHEMA, TEST_TABLE, "end_time")
     require_column(conn, TEST_SCHEMA, TEST_TABLE, "station")
 
-    # LIFE
     require_column(conn, LIFE_SCHEMA, LIFE_TABLE, "sparepart")
     require_column(conn, LIFE_SCHEMA, LIFE_TABLE, "p25")
 
@@ -790,12 +782,6 @@ def ts_expr(day_col: str, time_col: str) -> str:
 
 
 def fetch_new_tests_ts_list(conn, station: str, after_ts: datetime, upper_ts: datetime, limit: int) -> List[datetime]:
-    """
-    TEST 테이블은 end_day/end_time 기반 -> ts_expr는 naive(timestamp)로 만들어질 수 있음.
-    비교/저장은 KST-aware로 통일해야 하므로,
-    - 쿼리는 naive로 비교 수행(동일 표현)
-    - 결과를 받아서 KST-aware로 변환해 반환
-    """
     after_ts = ensure_aware_kst(after_ts) or after_ts
     upper_ts = ensure_aware_kst(upper_ts) or upper_ts
 
@@ -819,8 +805,7 @@ def fetch_new_tests_ts_list(conn, station: str, after_ts: datetime, upper_ts: da
 
     out: List[datetime] = []
     for r in rows or []:
-        dt = r[0]
-        dt = ensure_aware_kst(dt)
+        dt = ensure_aware_kst(r[0])
         if dt is not None:
             out.append(dt)
     return out
@@ -837,11 +822,7 @@ def roll_state_to_next(conn, st: State, station: str, sparepart: str) -> None:
     else:
         st.next_repl_end_ts = None
     save_state(conn, st)
-    log(
-        f"[ROLL] {station}/{sparepart} {prev_current} -> {st.current_repl_end_ts} next={st.next_repl_end_ts}",
-        info="info",
-        conn=conn,
-    )
+    log(f"[ROLL] {station}/{sparepart} {prev_current} -> {st.current_repl_end_ts} next={st.next_repl_end_ts}")
 
 
 def repl_count_debug(conn, station: str, sparepart: str) -> Tuple[int, Optional[datetime], Optional[datetime]]:
@@ -862,54 +843,64 @@ def repl_count_debug(conn, station: str, sparepart: str) -> Tuple[int, Optional[
 
 
 # =================================================
-# 12) MAIN
+# 13) MAIN
 # =================================================
 def main() -> None:
-    RUN_ID = now_kst().strftime("%Y%m%d_%H%M%S") + "_v9_3_logdb"
-    ALGO_VER = "v9_3_logdb"
+    RUN_ID = now_kst().strftime("%Y%m%d_%H%M%S") + "_v9_4_logdb_recover"
+    ALGO_VER = "v9_4_logdb_recover"
 
-    conn: Optional[psycopg2.extensions.connection] = None
+    main_conn: Optional[psycopg2.extensions.connection] = None
+    log_conn: Optional[psycopg2.extensions.connection] = None
+
     cached_model_id: Optional[int] = None
     cached_model: Any = None
 
     life_map: Dict[str, float] = {}
     last_life_reload = 0.0
     last_hb = 0.0
+    last_log_flush = 0.0
+    last_ping = 0.0
 
-    log(f"[START] run_id={RUN_ID} algo_ver={ALGO_VER}", info="info", conn=None)
+    log(f"[START] run_id={RUN_ID} algo_ver={ALGO_VER}")
 
     while True:
         try:
-            if conn is None or conn.closed != 0:
-                conn = connect_forever()
-                ensure_tables(conn)
-                preflight_required_columns(conn)
-                flush_db_logs(conn)
-
-                log(f"[SRC] REPL={REPL_SCHEMA}.{REPL_TABLE} reset_ts=to_ts exclude={list(REPL_EXCLUDE_STATIONS)}", info="info", conn=conn)
-                log(f"[SRC] STATE={STATE_SCHEMA}.{STATE_TABLE} (timestamptz aware; KST normalize)", info="info", conn=conn)
-
             now_ts = time.time()
             now_dt = now_kst()
 
+            if log_conn is None or (now_ts - last_ping >= PING_INTERVAL_SEC and not ping_db(log_conn)):
+                safe_close(log_conn)
+                log_conn = connect_forever_log()
+
+            if main_conn is None or (now_ts - last_ping >= PING_INTERVAL_SEC and not ping_db(main_conn)):
+                safe_close(main_conn)
+                main_conn = connect_forever_main()
+                ensure_tables(main_conn)
+                preflight_required_columns(main_conn)
+                log(f"[SRC] REPL={REPL_SCHEMA}.{REPL_TABLE} reset_ts=to_ts exclude={list(REPL_EXCLUDE_STATIONS)}")
+                log(f"[SRC] STATE={STATE_SCHEMA}.{STATE_TABLE} (timestamptz aware; KST normalize)")
+
+            if now_ts - last_ping >= PING_INTERVAL_SEC:
+                last_ping = now_ts
+
+            if now_ts - last_log_flush >= LOG_FLUSH_INTERVAL_SEC or len(PENDING_DB_LOGS) >= LOG_FLUSH_BATCH_SIZE:
+                log_conn = flush_db_logs(log_conn)
+                last_log_flush = now_ts
+
             if now_ts - last_hb >= 60:
-                log(
-                    f"[HEARTBEAT] now={now_dt.strftime('%Y-%m-%d %H:%M:%S %z')} run_id={RUN_ID}",
-                    info="info",
-                    conn=conn,
-                )
+                log(f"[HEARTBEAT] now={now_dt.strftime('%Y-%m-%d %H:%M:%S %z')} run_id={RUN_ID}")
                 last_hb = now_ts
 
             if not life_map or (now_ts - last_life_reload >= 300):
-                life_map = load_life_p25_map(conn)
+                life_map = load_life_p25_map(main_conn)
                 last_life_reload = now_ts
-                log(f"[OK] life(p25) loaded: {life_map}", info="info", conn=conn)
+                log(f"[OK] life(p25) loaded: {life_map}")
 
-            model, mid = load_model_max_id(conn)
+            model, mid = load_model_max_id(main_conn)
             if cached_model_id != mid:
                 cached_model_id = mid
                 cached_model = model
-                log(f"[OK] model loaded (id={mid})", info="info", conn=conn)
+                log(f"[OK] model loaded (id={mid})")
 
             need_immediate = False
 
@@ -920,15 +911,16 @@ def main() -> None:
                         continue
 
                     try:
-                        repl_n, repl_first, repl_last = repl_count_debug(conn, station, sparepart)
-                        log(f"[REPL-CHECK] {station}/{sparepart} repl_n={repl_n} first={repl_first} last={repl_last}", info="info", conn=conn)
+                        repl_n, repl_first, repl_last = repl_count_debug(main_conn, station, sparepart)
+                        log(f"[REPL-CHECK] {station}/{sparepart} repl_n={repl_n} first={repl_first} last={repl_last}")
                     except Exception as e:
-                        log(f"[REPL-CHECK-ERROR] {station}/{sparepart} {type(e).__name__}: {e}", info="error", conn=conn)
+                        log(f"[REPL-CHECK-ERROR] {station}/{sparepart} {type(e).__name__}: {e}", info="error")
+                        raise
 
-                    st = load_state(conn, station, sparepart)
+                    st = load_state(main_conn, station, sparepart)
 
                     if st.current_repl_end_ts is None:
-                        repl_list = list_repl_end_ts(conn, station, sparepart)
+                        repl_list = list_repl_end_ts(main_conn, station, sparepart)
                         if not repl_list:
                             continue
                         st.current_repl_end_ts = ensure_aware_kst(repl_list[0])
@@ -936,26 +928,18 @@ def main() -> None:
                         st.last_test_ts = st.current_repl_end_ts
                         st.amount = 0
                         st.last_alarm_type = None
-                        save_state(conn, st)
+                        save_state(main_conn, st)
                         need_immediate = True
-                        log(
-                            f"[INIT] {station}/{sparepart} current_end={st.current_repl_end_ts} next_end={st.next_repl_end_ts}",
-                            info="info",
-                            conn=conn,
-                        )
+                        log(f"[INIT] {station}/{sparepart} current_end={st.current_repl_end_ts} next_end={st.next_repl_end_ts}")
 
                     for _guard in range(50):
                         if st.current_repl_end_ts is not None:
-                            nxt = find_next_repl_end_after(conn, station, sparepart, st.current_repl_end_ts)
+                            nxt = find_next_repl_end_after(main_conn, station, sparepart, st.current_repl_end_ts)
                             if nxt is not None and (st.next_repl_end_ts is None or nxt != st.next_repl_end_ts):
                                 st.next_repl_end_ts = nxt
-                                save_state(conn, st)
+                                save_state(main_conn, st)
                                 need_immediate = True
-                                log(
-                                    f"[NEXT-UPDATE] {station}/{sparepart} next_end={st.next_repl_end_ts}",
-                                    info="info",
-                                    conn=conn,
-                                )
+                                log(f"[NEXT-UPDATE] {station}/{sparepart} next_end={st.next_repl_end_ts}")
 
                         if st.last_alarm_type == "교체" and st.next_repl_end_ts is None:
                             break
@@ -977,21 +961,17 @@ def main() -> None:
 
                         if after_ts >= upper_ts:
                             if st.next_repl_end_ts is not None and now_dt >= st.next_repl_end_ts:
-                                roll_state_to_next(conn, st, station, sparepart)
+                                roll_state_to_next(main_conn, st, station, sparepart)
                                 need_immediate = True
                                 continue
                             break
 
-                        ts_list = fetch_new_tests_ts_list(conn, station, after_ts, upper_ts, BATCH_LIMIT_TEST_ROWS)
+                        ts_list = fetch_new_tests_ts_list(main_conn, station, after_ts, upper_ts, BATCH_LIMIT_TEST_ROWS)
 
                         if not ts_list:
                             if st.next_repl_end_ts is not None and now_dt >= st.next_repl_end_ts and upper_ts == st.next_repl_end_ts:
-                                log(
-                                    f"[ROLL-NO-TEST] {station}/{sparepart} gap_no_tests (after={after_ts} <= next={st.next_repl_end_ts})",
-                                    info="info",
-                                    conn=conn,
-                                )
-                                roll_state_to_next(conn, st, station, sparepart)
+                                log(f"[ROLL-NO-TEST] {station}/{sparepart} gap_no_tests (after={after_ts} <= next={st.next_repl_end_ts})")
+                                roll_state_to_next(main_conn, st, station, sparepart)
                                 need_immediate = True
                                 continue
                             break
@@ -1022,14 +1002,13 @@ def main() -> None:
                                             pass_prob = False
 
                                         log(
-                                            f"[EVAL] {station}/{sparepart} amount={st.amount} ratio={ratio:.3f} -> {alarm_type} prob={prob:.4f} pass={pass_prob}",
-                                            info="info",
-                                            conn=conn,
+                                            f"[EVAL] {station}/{sparepart} amount={st.amount} "
+                                            f"ratio={ratio:.3f} -> {alarm_type} prob={prob:.4f} pass={pass_prob}"
                                         )
 
                                         if pass_prob:
                                             insert_alarm(
-                                                conn=conn,
+                                                conn=main_conn,
                                                 station=station,
                                                 sparepart=sparepart,
                                                 alarm_type=alarm_type,
@@ -1043,17 +1022,9 @@ def main() -> None:
                                                 reset_repl_ts=st.current_repl_end_ts,
                                             )
                                             st.last_alarm_type = alarm_type
-                                            log(
-                                                f"[ALARM-SAVED] {station}/{sparepart} {alarm_type} (event_ts={tts})",
-                                                info="info",
-                                                conn=conn,
-                                            )
+                                            log(f"[ALARM-SAVED] {station}/{sparepart} {alarm_type} (event_ts={tts})")
                                         else:
-                                            log(
-                                                f"[ALARM-SKIP] {station}/{sparepart} {alarm_type} (prob<{min_prob})",
-                                                info="info",
-                                                conn=conn,
-                                            )
+                                            log(f"[ALARM-SKIP] {station}/{sparepart} {alarm_type} (prob<{min_prob})")
 
                                     else:
                                         try:
@@ -1065,13 +1036,12 @@ def main() -> None:
                                             prob = 0.0
 
                                         log(
-                                            f"[EVAL] {station}/{sparepart} amount={st.amount} ratio={ratio:.3f} -> {alarm_type} prob={prob:.4f} pass=True",
-                                            info="info",
-                                            conn=conn,
+                                            f"[EVAL] {station}/{sparepart} amount={st.amount} "
+                                            f"ratio={ratio:.3f} -> {alarm_type} prob={prob:.4f} pass=True"
                                         )
 
                                         insert_alarm(
-                                            conn=conn,
+                                            conn=main_conn,
                                             station=station,
                                             sparepart=sparepart,
                                             alarm_type=alarm_type,
@@ -1085,36 +1055,38 @@ def main() -> None:
                                             reset_repl_ts=st.current_repl_end_ts,
                                         )
                                         st.last_alarm_type = alarm_type
-                                        log(
-                                            f"[ALARM-SAVED] {station}/{sparepart} {alarm_type} (event_ts={tts})",
-                                            info="info",
-                                            conn=conn,
-                                        )
+                                        log(f"[ALARM-SAVED] {station}/{sparepart} {alarm_type} (event_ts={tts})")
 
                                         if alarm_type == "교체" and st.next_repl_end_ts is None:
                                             break
 
-                        save_state(conn, st)
+                        save_state(main_conn, st)
                         continue
 
+            if now_ts - last_log_flush >= 1 or len(PENDING_DB_LOGS) >= LOG_FLUSH_BATCH_SIZE:
+                log_conn = flush_db_logs(log_conn)
+                last_log_flush = time.time()
+
             if need_immediate:
-                log("[LOOP] sleep 0 (backfill/realtime immediate)", info="sleep", conn=conn)
-                time.sleep(0)
+                log("[LOOP] sleep 0.2s (backfill/realtime immediate)", info="sleep")
+                log_conn = flush_db_logs(log_conn)
+                time.sleep(IMMEDIATE_SLEEP_SEC)
             else:
-                log(f"[LOOP] sleep {LOOP_INTERVAL_SEC}s", info="sleep", conn=conn)
+                log(f"[LOOP] sleep {LOOP_INTERVAL_SEC}s", info="sleep")
+                log_conn = flush_db_logs(log_conn)
                 time.sleep(LOOP_INTERVAL_SEC)
 
-            flush_db_logs(conn)
-
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            log(f"[ERROR] DB disconnected: {type(e).__name__}: {e}", info="down", conn=None)
-            safe_close(conn)
-            conn = None
+            log(f"[ERROR] DB disconnected: {type(e).__name__}: {e}", info="down")
+            safe_close(main_conn)
+            main_conn = None
             time.sleep(2)
 
         except Exception as e:
-            log(f"[ERROR] runtime: {type(e).__name__}: {e}", info="error", conn=conn)
-            log(traceback.format_exc(), info="error", conn=conn)
+            log(f"[ERROR] runtime: {type(e).__name__}: {e}", info="error")
+            log(traceback.format_exc(), info="error")
+            safe_close(main_conn)
+            main_conn = None
             time.sleep(2)
 
 
