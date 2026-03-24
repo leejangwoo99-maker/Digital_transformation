@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Factory Realtime - FCT Non Operation Time Inspector (fast final)
+Factory Realtime - FCT Non Operation Time Inspector (final)
 
-속도 개선 핵심
+운영 조건
+1) loop 2초 유지
+2) stable cut 1초 유지
+3) 신규 이벤트 즉시 upsert
+4) 값 같으면 update 안 함
+5) startup full rescan 유지
+
+핵심 로직
 1) FCT1~4 병렬 조회
 2) pandas 제거
 3) station별 MAX(id) 별도 조회 제거
@@ -10,6 +17,20 @@ Factory Realtime - FCT Non Operation Time Inspector (fast final)
 5) engine pool 확대
 6) timestamp 파싱 경량화
 7) heartbeat DB 저장 최소화 유지
+
+이벤트 규칙
+1) "TEST RESULT%" > "TEST AUTO MODE START%" 사이에
+   "Manual mode 전환" 이 한 번이라도 있으면 save table의 manual 컬럼에 "o" 저장
+2) "Manual mode 전환" 이 연속으로 여러 번 나와도 상관없이 기존 조건으로 산출
+3) Manual mode 전환 이후 AUTO START 이전의 TEST RESULT 는 무시
+
+중요 보완
+1) stable_cut 때문에 최신이라 skip한 행의 id를 cursor에 반영하지 않음
+   -> 실제로 처리 가능한 안정화 행까지만 cursor 전진
+2) 동일 값 재UPSERT 시 불필요한 UPDATE 방지
+   -> updated_at 불필요 갱신 최소화
+3) startup full rescan 유지
+   -> 재시작 직후 today cursor reset + first run fullscan
 """
 
 from __future__ import annotations
@@ -27,7 +48,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import urllib.parse
 
-import psycopg2
 from psycopg2.extras import execute_values
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError, DBAPIError
@@ -58,6 +78,7 @@ SAVE_TABLE = "fct_non_operation_time"
 CURSOR_SCHEMA = "g_production_film"
 CURSOR_TABLE = "fct_non_operation_time_cursor"
 
+# 운영 조건 유지
 LOOP_INTERVAL_SEC = 2.0
 STABLE_DATA_SEC = 1.0
 
@@ -67,6 +88,7 @@ RETRY_SLEEP_SEC = 10
 WORK_MEM = "32MB"
 STATEMENT_TIMEOUT_MS = 60000
 
+# startup full rescan 유지
 STARTUP_FULL_RESCAN_TODAY = True
 STARTUP_FORCE_FIRST_RUN_FULLSCAN = True
 
@@ -301,8 +323,12 @@ def print_env_header():
         pass
     log("log_file={0}".format(LOG_PATH), info="boot")
     safe_url = build_db_url(DB_CONFIG).replace(urllib.parse.quote_plus(DB_CONFIG["password"]), "***")
-    log("[DB] host={0} port={1} db={2} user={3}".format(
-        DB_CONFIG["host"], DB_CONFIG["port"], DB_CONFIG["dbname"], DB_CONFIG["user"]), info="db")
+    log(
+        "[DB] host={0} port={1} db={2} user={3}".format(
+            DB_CONFIG["host"], DB_CONFIG["port"], DB_CONFIG["dbname"], DB_CONFIG["user"]
+        ),
+        info="db",
+    )
     log("[DB_URL] {0}".format(safe_url), info="db")
     log("work_mem={0} statement_timeout_ms={1}".format(WORK_MEM, STATEMENT_TIMEOUT_MS), info="db")
     log("=" * 110, info="boot")
@@ -356,6 +382,7 @@ def _fresh_empty_state():
         "last_id": None,
         "pending_result_time": None,
         "manual_block": 0,
+        "manual_seen": 0,
     }
 
 
@@ -402,7 +429,7 @@ def _make_engine():
 
     connect_args = {
         "connect_timeout": int(DB_CONNECT_TIMEOUT_SEC),
-        "application_name": "fct_nonop_realtime_fast",
+        "application_name": "fct_nonop_realtime_final",
         "options": opt,
     }
 
@@ -465,9 +492,12 @@ def recover_engine_and_thresholds_blocking():
         while th_map is None:
             try:
                 th_map = load_thresholds(engine)
-                log("[OK] thresholds loaded: value={0} sec | month={1} | fallback={2}".format(
-                    th_map.get("ALL"), th_map.get("month"), th_map.get("fallback")
-                ), info="load")
+                log(
+                    "[OK] thresholds loaded: value={0} sec | month={1} | fallback={2}".format(
+                        th_map.get("ALL"), th_map.get("month"), th_map.get("fallback")
+                    ),
+                    info="load",
+                )
             except Exception as e:
                 if is_db_disconnect_error(e):
                     log("[WARN] thresholds load hit DB disconnect -> re-init engine", info="down")
@@ -499,13 +529,20 @@ def ensure_cursor_table(engine):
         last_id              BIGINT NULL,
         pending_result_time  TEXT NULL,
         manual_block         INTEGER NOT NULL DEFAULT 0,
+        manual_seen          INTEGER NOT NULL DEFAULT 0,
         updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (end_day, station)
     );
     """)
+    alter_manual_seen = text(f"""
+        ALTER TABLE {CURSOR_SCHEMA}.{CURSOR_TABLE}
+        ADD COLUMN IF NOT EXISTS manual_seen INTEGER NOT NULL DEFAULT 0
+    """)
+
     with engine.begin() as conn:
         _session_guard(conn)
         conn.execute(ddl)
+        conn.execute(alter_manual_seen)
 
 
 def reset_today_cursors(engine, end_day: str):
@@ -522,7 +559,7 @@ def reset_today_cursors(engine, end_day: str):
 def load_cursors(engine, end_day: str) -> dict:
     ensure_cursor_table(engine)
     q = text(f"""
-        SELECT station, last_id, pending_result_time, manual_block
+        SELECT station, last_id, pending_result_time, manual_block, manual_seen
         FROM {CURSOR_SCHEMA}.{CURSOR_TABLE}
         WHERE end_day = :end_day
     """)
@@ -538,6 +575,7 @@ def load_cursors(engine, end_day: str) -> dict:
             "last_id": r["last_id"],
             "pending_result_time": r["pending_result_time"],
             "manual_block": int(r["manual_block"] or 0),
+            "manual_seen": int(r["manual_seen"] or 0),
         }
     return cur
 
@@ -550,14 +588,15 @@ def upsert_cursor_states_batch(engine, end_day: str, state_updates: list[tuple[s
 
     q = text(f"""
         INSERT INTO {CURSOR_SCHEMA}.{CURSOR_TABLE}
-        (end_day, station, last_id, pending_result_time, manual_block, updated_at)
+        (end_day, station, last_id, pending_result_time, manual_block, manual_seen, updated_at)
         VALUES
-        (:end_day, :station, :last_id, :pending_result_time, :manual_block, now())
+        (:end_day, :station, :last_id, :pending_result_time, :manual_block, :manual_seen, now())
         ON CONFLICT (end_day, station)
         DO UPDATE SET
             last_id = EXCLUDED.last_id,
             pending_result_time = EXCLUDED.pending_result_time,
             manual_block = EXCLUDED.manual_block,
+            manual_seen = EXCLUDED.manual_seen,
             updated_at = now()
     """)
 
@@ -569,6 +608,7 @@ def upsert_cursor_states_batch(engine, end_day: str, state_updates: list[tuple[s
             "last_id": int(state["last_id"]) if state.get("last_id") is not None else None,
             "pending_result_time": state.get("pending_result_time"),
             "manual_block": int(state.get("manual_block") or 0),
+            "manual_seen": int(state.get("manual_seen") or 0),
         })
 
     with engine.begin() as conn:
@@ -645,7 +685,10 @@ def threshold_for_station(th_map: dict, station: str) -> float:
 # =========================
 def load_fct_incremental(engine, end_day: str, station: str, last_id):
     """
-    별도 MAX(id) 조회 없이 본조회 한 번으로 처리
+    핵심:
+    - fetched rows 전체의 max_id를 cursor에 반영하지 않음
+    - 실제로 처리 가능한 안정화(stable_cut 이하) 행까지만 processed_max_id 전진
+    - 신규 이벤트는 다음 단계에서 즉시 upsert
     """
     tbl = FCT_TABLES[station]
     stable_cut = datetime.now() - timedelta(seconds=STABLE_DATA_SEC)
@@ -689,26 +732,44 @@ def load_fct_incremental(engine, end_day: str, station: str, last_id):
         rows = conn.execute(q, params).mappings().all()
 
     if not rows:
-        return [], last_id
+        return {
+            "rows": [],
+            "processed_max_id": last_id,
+            "fetched_count": 0,
+            "stable_skip_count": 0,
+            "parse_skip_count": 0,
+            "event_skip_count": 0,
+            "processed_count": 0,
+        }
 
     out = []
-    fetched_max_id = last_id
+    processed_max_id = last_id
+    fetched_count = len(rows)
+    stable_skip_count = 0
+    parse_skip_count = 0
+    event_skip_count = 0
+    processed_count = 0
 
     for r in rows:
         rid = int(r["id"])
-        if fetched_max_id is None or rid > fetched_max_id:
-            fetched_max_id = rid
 
         ts = parse_day_time(r["end_day"], r["end_time"])
         if ts is None:
+            parse_skip_count += 1
             continue
+
         if ts > stable_cut:
+            stable_skip_count += 1
             continue
 
         contents = str(r["contents"] or "")
         evt = classify_event(contents)
         if evt is None:
+            event_skip_count += 1
             continue
+
+        if processed_max_id is None or rid > processed_max_id:
+            processed_max_id = rid
 
         out.append({
             "id": rid,
@@ -719,21 +780,40 @@ def load_fct_incremental(engine, end_day: str, station: str, last_id):
             "_ts": ts,
             "_event_type": evt,
         })
+        processed_count += 1
 
-    return out, fetched_max_id
+    return {
+        "rows": out,
+        "processed_max_id": processed_max_id,
+        "fetched_count": fetched_count,
+        "stable_skip_count": stable_skip_count,
+        "parse_skip_count": parse_skip_count,
+        "event_skip_count": event_skip_count,
+        "processed_count": processed_count,
+    }
 
 
 def load_station_job(engine, end_day: str, station: str, last_id):
     t0 = time_mod.time()
-    rows, fetched_max_id = load_fct_incremental(engine, end_day, station, last_id)
+    result = load_fct_incremental(engine, end_day, station, last_id)
     elapsed = time_mod.time() - t0
-    return station, rows, fetched_max_id, elapsed
+    result["elapsed"] = elapsed
+    result["station"] = station
+    return result
 
 
 # =========================
 # 5) event calc
 # =========================
-def _append_event(events: list, end_day: str, station: str, from_time: str, to_time: str, diff_sec: float):
+def _append_event(
+    events: list,
+    end_day: str,
+    station: str,
+    from_time: str,
+    to_time: str,
+    diff_sec: float,
+    manual_flag: str | None,
+):
     if diff_sec is None:
         return
     try:
@@ -742,12 +822,14 @@ def _append_event(events: list, end_day: str, station: str, from_time: str, to_t
         return
     if diff_val <= 0:
         return
+
     events.append({
         "end_day": str(end_day),
         "station": str(station),
         "from_time": str(from_time),
         "to_time": str(to_time),
         "no_operation_time": diff_val,
+        "manual": manual_flag,
     })
 
 
@@ -757,19 +839,21 @@ def compute_events_for_station(
     rows: list[dict],
     th_map: dict,
     prev_state: dict,
-    fetched_max_id,
+    processed_max_id,
 ):
-    max_id = fetched_max_id if fetched_max_id is not None else prev_state.get("last_id")
+    max_id = processed_max_id if processed_max_id is not None else prev_state.get("last_id")
 
     pending_result_time = prev_state.get("pending_result_time")
     pending_result_ts = parse_day_time(end_day, pending_result_time) if pending_result_time else None
     manual_block = int(prev_state.get("manual_block") or 0)
+    manual_seen = int(prev_state.get("manual_seen") or 0)
 
     if not rows:
         new_state = {
             "last_id": max_id,
             "pending_result_time": pending_result_time,
             "manual_block": manual_block,
+            "manual_seen": manual_seen,
         }
         return station, new_state, []
 
@@ -783,16 +867,20 @@ def compute_events_for_station(
 
         if event_type == "MANUAL":
             manual_block = 1
+            if pending_result_ts is not None:
+                manual_seen = 1
             continue
 
         if event_type == "RESULT":
             if pending_result_ts is None:
                 pending_result_time = cur_end_time
                 pending_result_ts = cur_ts
+                manual_seen = 0
             else:
                 if manual_block == 0:
                     pending_result_time = cur_end_time
                     pending_result_ts = cur_ts
+                    manual_seen = 0
             continue
 
         if event_type == "AUTO_START":
@@ -806,11 +894,13 @@ def compute_events_for_station(
                         from_time=pending_result_time,
                         to_time=cur_end_time,
                         diff_sec=diff,
+                        manual_flag="o" if manual_seen else None,
                     )
 
             pending_result_time = None
             pending_result_ts = None
             manual_block = 0
+            manual_seen = 0
             continue
 
     dedup = {}
@@ -825,6 +915,7 @@ def compute_events_for_station(
         "last_id": max_id,
         "pending_result_time": pending_result_time,
         "manual_block": manual_block,
+        "manual_seen": manual_seen,
     }
 
     return station, new_state, out
@@ -842,16 +933,41 @@ def ensure_target_table(engine):
         from_time         TEXT NOT NULL,
         to_time           TEXT NOT NULL,
         no_operation_time NUMERIC(12,2),
-        created_at        TIMESTAMPTZ DEFAULT now(),
+        manual            TEXT NULL,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (end_day, station, from_time, to_time)
     );
     """)
+
+    alter_manual = text(f"""
+        ALTER TABLE {SAVE_SCHEMA}.{SAVE_TABLE}
+        ADD COLUMN IF NOT EXISTS manual TEXT NULL
+    """)
+
+    alter_created_at = text(f"""
+        ALTER TABLE {SAVE_SCHEMA}.{SAVE_TABLE}
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    """)
+
+    alter_updated_at = text(f"""
+        ALTER TABLE {SAVE_SCHEMA}.{SAVE_TABLE}
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    """)
+
     with engine.begin() as conn:
         _session_guard(conn)
         conn.execute(ddl)
+        conn.execute(alter_manual)
+        conn.execute(alter_created_at)
+        conn.execute(alter_updated_at)
 
 
 def upsert_events(engine, events: list[dict]) -> int:
+    """
+    신규 이벤트는 즉시 upsert
+    동일 값이면 update 안 함
+    """
     if not events:
         return 0
 
@@ -865,12 +981,18 @@ def upsert_events(engine, events: list[dict]) -> int:
             continue
         if val <= 0:
             continue
+
+        manual_val = ev.get("manual")
+        if manual_val is not None:
+            manual_val = str(manual_val).strip() or None
+
         values.append((
             str(ev["end_day"]),
             str(ev["station"]),
             str(ev["from_time"]),
             str(ev["to_time"]),
             round(val, 2),
+            manual_val,
         ))
 
     if not values:
@@ -878,13 +1000,20 @@ def upsert_events(engine, events: list[dict]) -> int:
 
     sql = f"""
         INSERT INTO {SAVE_SCHEMA}.{SAVE_TABLE}
-        (end_day, station, from_time, to_time, no_operation_time)
+        (end_day, station, from_time, to_time, no_operation_time, manual)
         VALUES %s
         ON CONFLICT (end_day, station, from_time, to_time)
-        DO UPDATE SET no_operation_time = EXCLUDED.no_operation_time
+        DO UPDATE SET
+            no_operation_time = EXCLUDED.no_operation_time,
+            manual = EXCLUDED.manual,
+            updated_at = now()
+        WHERE
+            {SAVE_SCHEMA}.{SAVE_TABLE}.no_operation_time IS DISTINCT FROM EXCLUDED.no_operation_time
+            OR {SAVE_SCHEMA}.{SAVE_TABLE}.manual IS DISTINCT FROM EXCLUDED.manual
     """
 
     raw = engine.raw_connection()
+    cur = None
     try:
         cur = raw.cursor()
         cur.execute(f"SET work_mem TO '{WORK_MEM}'")
@@ -897,7 +1026,8 @@ def upsert_events(engine, events: list[dict]) -> int:
         raise
     finally:
         try:
-            cur.close()
+            if cur is not None:
+                cur.close()
         except Exception:
             pass
         raw.close()
@@ -932,17 +1062,38 @@ def main_once(engine, th_map, force_first_fullscan: bool = False):
             fut_map[fut] = st
 
         for fut in as_completed(fut_map):
-            st, rows, fetched_max_id, elapsed = fut.result()
-            station_payloads[st] = (rows, fetched_max_id)
-            log("[LOAD-END] {0} {1} rows={2} max_id={3} elapsed={4:.3f}s".format(
-                end_day, st, len(rows), fetched_max_id, elapsed
-            ), info="load")
+            result = fut.result()
+            st = result["station"]
+            station_payloads[st] = result
+
+            log(
+                "[LOAD-END] {0} {1} fetched={2} processed={3} stable_skip={4} parse_skip={5} event_skip={6} "
+                "processed_max_id={7} elapsed={8:.3f}s".format(
+                    end_day,
+                    st,
+                    result["fetched_count"],
+                    result["processed_count"],
+                    result["stable_skip_count"],
+                    result["parse_skip_count"],
+                    result["event_skip_count"],
+                    result["processed_max_id"],
+                    result["elapsed"],
+                ),
+                info="load",
+            )
 
     all_events = []
     state_updates = []
 
     for st in ("FCT1", "FCT2", "FCT3", "FCT4"):
-        rows, fetched_max_id = station_payloads.get(st, ([], cursors[st].get("last_id")))
+        payload = station_payloads.get(st, None)
+        if payload is None:
+            rows = []
+            processed_max_id = cursors[st].get("last_id")
+        else:
+            rows = payload["rows"]
+            processed_max_id = payload["processed_max_id"]
+
         prev_state = cursors.get(st, _fresh_empty_state())
 
         st_name, new_state, ev = compute_events_for_station(
@@ -951,12 +1102,13 @@ def main_once(engine, th_map, force_first_fullscan: bool = False):
             rows=rows,
             th_map=th_map,
             prev_state=prev_state,
-            fetched_max_id=fetched_max_id,
+            processed_max_id=processed_max_id,
         )
 
         if ev:
             all_events.extend(ev)
-            log("[EVT] {0}: events={1}".format(st_name, len(ev)), info="evt")
+            manual_cnt = sum(1 for x in ev if str(x.get("manual") or "").lower() == "o")
+            log("[EVT] {0}: events={1} manual_o={2}".format(st_name, len(ev), manual_cnt), info="evt")
         else:
             log("[EVT] {0}: events=0".format(st_name), info="evt")
 
@@ -971,12 +1123,13 @@ def main_once(engine, th_map, force_first_fullscan: bool = False):
     upsert_cursor_states_batch(engine, end_day=end_day, state_updates=state_updates)
     for st, state in state_updates:
         log(
-            "[CURSOR] {0} {1} -> last_id={2} pending_result_time={3} manual_block={4}".format(
+            "[CURSOR] {0} {1} -> last_id={2} pending_result_time={3} manual_block={4} manual_seen={5}".format(
                 end_day,
                 st,
                 state.get("last_id"),
                 state.get("pending_result_time"),
                 state.get("manual_block"),
+                state.get("manual_seen"),
             ),
             info="cursor"
         )
@@ -994,6 +1147,7 @@ def realtime_loop():
 
     engine, th_map = recover_engine_and_thresholds_blocking()
 
+    # startup full rescan 유지
     if STARTUP_FULL_RESCAN_TODAY:
         try:
             boot_end_day = today_yyyymmdd()
