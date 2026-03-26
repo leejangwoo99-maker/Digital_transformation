@@ -1009,25 +1009,27 @@ def _is_visual_sections_ready(page) -> bool:
                 """
                 () => {
                   const body = document.body ? (document.body.innerText || "") : "";
+                  const normalized = body.replace(/\\s+/g, " ").trim();
 
-                  const hasMainTitle = body.includes("실시간 생산 진행 현황");
-                  const hasNonopTitle = body.includes("비가동 시간 상세");
-                  const hasWorkerTitle = body.includes("작업자 정보");
-                  const hasMasterTitle = body.includes("mastersample test");
+                  const hasEnoughText = normalized.length >= 30;
 
-                  const hasChartSvg = document.querySelector("svg") !== null;
+                  const hasSvg = document.querySelector("svg") !== null;
                   const hasCanvas = document.querySelector("canvas") !== null;
-                  const hasInputs =
-                    document.querySelectorAll('input, select, textarea').length > 5;
 
-                  return Boolean(
-                    hasMainTitle &&
-                    hasNonopTitle &&
-                    hasWorkerTitle &&
-                    hasMasterTitle &&
-                    (hasChartSvg || hasCanvas) &&
-                    hasInputs
-                  );
+                  const hasTable =
+                    document.querySelector("table") !== null ||
+                    document.querySelector('[data-testid="stDataFrame"]') !== null;
+
+                  const hasInputs =
+                    document.querySelectorAll('input, select, textarea').length > 0;
+
+                  const hasMetric =
+                    document.querySelector('[data-testid="stMetric"]') !== null;
+
+                  const hasAnyVisual =
+                    hasSvg || hasCanvas || hasTable || hasInputs || hasMetric;
+
+                  return Boolean(hasEnoughText && hasAnyVisual);
                 }
                 """
             )
