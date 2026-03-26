@@ -492,6 +492,39 @@ def _mount_alarm_sse(now_day: str, now_shift: str, view_day: str, view_shift: st
     )
 
 
+def _snap_data_ready_state(prod_day: str, shift_type: str) -> Dict[str, Any]:
+    scope_ok = (
+        str(st.session_state.get("analysis_prod_day", "") or "") == str(prod_day)
+        and str(st.session_state.get("analysis_shift_type", "") or "") == str(shift_type)
+    )
+
+    data_ready = bool(st.session_state.get("p03_snap_data_ready", False))
+
+    ready = bool(scope_ok and data_ready)
+
+    return {
+        "ready": ready,
+        "scope_ok": scope_ok,
+        "data_ready": data_ready,
+        "scope": f"{prod_day}:{shift_type}",
+    }
+
+def _render_snap_ready_marker(prod_day: str, shift_type: str):
+    info = _snap_data_ready_state(prod_day, shift_type)
+    ready = bool(info.get("ready", False))
+
+    attrs = {
+        "id": "snap-ready",
+        "data-snap-ready": "1" if ready else "0",
+        "data-scope-ok": "1" if info.get("scope_ok") else "0",
+        "data-data-ready": "1" if info.get("data_ready") else "0",
+        "data-scope": str(info.get("scope", "")),
+    }
+
+    attr_txt = " ".join(f'{k}="{str(v)}"' for k, v in attrs.items())
+    st.markdown(f"<div {attr_txt}></div>", unsafe_allow_html=True)
+
+
 def _snap_mark_ready():
     components.html(
         """
@@ -514,6 +547,16 @@ def _snap_mark_ready():
             D.body.appendChild(el);
           }
 
+          function getSnapMarker() {
+            return D.getElementById("snap-ready");
+          }
+
+          function isDataReady() {
+            const m = getSnapMarker();
+            if (!m) return false;
+            return String(m.getAttribute("data-snap-ready") || "0") === "1";
+          }
+
           function waitFrames(n) {
             return new Promise((resolve) => {
               function step() {
@@ -525,7 +568,7 @@ def _snap_mark_ready():
             });
           }
 
-          async function settle() {
+          async function settleAfterReady() {
             try {
               if (D.fonts && D.fonts.ready) {
                 await D.fonts.ready;
@@ -533,12 +576,27 @@ def _snap_mark_ready():
             } catch (e) {}
 
             await waitFrames(4);
-            await new Promise((resolve) => setTimeout(resolve, 250));
-            await waitFrames(2);
-            markReady();
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            await waitFrames(4);
           }
 
-          settle();
+          async function pollReady() {
+            const deadline = Date.now() + 180000;
+
+            while (Date.now() < deadline) {
+              if (isDataReady()) {
+                await settleAfterReady();
+                if (isDataReady()) {
+                  markReady();
+                  return;
+                }
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+          }
+
+          removeOld();
+          pollReady();
         })();
         </script>
         """,
@@ -852,5 +910,12 @@ if _is_empty_df(df_h):
 else:
     df_h = _drop_cols(df_h, ["updated_at"])
     safe_show_df(df_h, raw_df=df_h, use_container_width=True, hide_index=True)
+
+st.session_state["p03_snap_data_ready"] = True
+
+_render_snap_ready_marker(
+    str(st.session_state.get("analysis_prod_day", "") or ""),
+    str(st.session_state.get("analysis_shift_type", "") or ""),
+)
 
 _snap_mark_ready()

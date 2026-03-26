@@ -825,6 +825,45 @@ def _parallel_fetch_reports(active_day: str, active_shift: str) -> Dict[str, pd.
 # -----------------------------
 # snapshot ready marker
 # -----------------------------
+
+
+def _snap_data_ready_state(prod_day: str, shift_type: str) -> Dict[str, Any]:
+    scope_ok = (
+        str(st.session_state.get("p02_active_day", "") or "") == str(prod_day)
+        and str(st.session_state.get("p02_active_shift", "") or "") == str(shift_type)
+    )
+
+    rows_ready = bool(st.session_state.get("p02_snap_rows_ready", False))
+
+    ready = bool(scope_ok and rows_ready)
+
+    return {
+        "ready": ready,
+        "scope_ok": scope_ok,
+        "rows_ready": rows_ready,
+        "scope": f"{prod_day}:{shift_type}",
+    }
+
+
+def _render_snap_ready_marker(prod_day: str, shift_type: str):
+    if not SNAP_MODE:
+        return
+
+    info = _snap_data_ready_state(prod_day, shift_type)
+    ready = bool(info.get("ready", False))
+
+    attrs = {
+        "id": "snap-ready",
+        "data-snap-ready": "1" if ready else "0",
+        "data-scope-ok": "1" if info.get("scope_ok") else "0",
+        "data-rows-ready": "1" if info.get("rows_ready") else "0",
+        "data-scope": str(info.get("scope", "")),
+    }
+
+    attr_txt = " ".join(f'{k}="{str(v)}"' for k, v in attrs.items())
+    st.markdown(f"<div {attr_txt}></div>", unsafe_allow_html=True)
+
+
 def _snap_mark_ready():
     if not SNAP_MODE:
         return
@@ -850,6 +889,16 @@ def _snap_mark_ready():
             D.body.appendChild(el);
           }
 
+          function getSnapMarker() {
+            return D.getElementById("snap-ready");
+          }
+
+          function isDataReady() {
+            const m = getSnapMarker();
+            if (!m) return false;
+            return String(m.getAttribute("data-snap-ready") || "0") === "1";
+          }
+
           function waitFrames(n) {
             return new Promise((resolve) => {
               function step() {
@@ -861,7 +910,7 @@ def _snap_mark_ready():
             });
           }
 
-          async function settle() {
+          async function settleAfterReady() {
             try {
               if (D.fonts && D.fonts.ready) {
                 await D.fonts.ready;
@@ -869,16 +918,27 @@ def _snap_mark_ready():
             } catch (e) {}
 
             await waitFrames(4);
-
-            await new Promise((resolve) => {
-              setTimeout(resolve, 250);
-            });
-
-            await waitFrames(2);
-            markReady();
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            await waitFrames(4);
           }
 
-          settle();
+          async function pollReady() {
+            const deadline = Date.now() + 180000;
+
+            while (Date.now() < deadline) {
+              if (isDataReady()) {
+                await settleAfterReady();
+                if (isDataReady()) {
+                  markReady();
+                  return;
+                }
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+          }
+
+          removeOld();
+          pollReady();
         })();
         </script>
         """,
@@ -1037,4 +1097,12 @@ now_day, now_shift = _now_prod_day_shift()
 _mount_alarm_sse(now_day, now_shift, active_day, active_shift)
 
 # 모든 렌더링 이후 snapshot ready 마킹
+st.session_state["p02_snap_rows_ready"] = True
+
+if SNAP_MODE:
+    _render_snap_ready_marker(
+        str(st.session_state.get("p02_active_day", "") or ""),
+        str(st.session_state.get("p02_active_shift", "") or ""),
+    )
+
 _snap_mark_ready()
