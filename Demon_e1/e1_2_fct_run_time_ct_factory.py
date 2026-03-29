@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-e1_2_fct_runtime_ct_daemon.py  (backend3-style connection, fixed end_time parsing)
+e1_2_fct_runtime_ct_daemon.py
 
-요구 반영:
-- ✅ DATA 엔진 / LOG 엔진 분리 (pool_size=1, max_overflow=0)
-- ✅ work_mem은 세션에서 SET
-- ✅ DB 접속 실패/끊김 시 무한 재접속(블로킹)
-- ✅ 루프마다 엔진 ping/재생성/OK 로그 반복 출력 금지
-- ✅ FETCH_LIMIT=2000
-- ✅ end_time 이 '205836', '03:23:13', '205836.123' 등이어도 안전 처리
-- ✅ SQL/Data 오류와 실제 DB 연결 오류를 분리 처리
+운영 방식
+- 평소에는 대기
+- heartbeat 전용 프로세스가 1분마다 별도 DB 커넥션으로 heartbeat 로그 기록
+- 메인 프로세스는 매일 자정 직후(00:00:10 이후) 전일 데이터를 기준으로 일자 단위 백필 수행
+- last_processed_day 기반 누락 일자 복구 지원
+- 월 전체 통계는 "월초 ~ 전일" 데이터를 일자 단위로 모아 계산
 
-기능 유지:
-- a2_fct_table.fct_table에서 iqz step(PD/Non-PD) run_time 수집
-- LATEST/HIST/OUTLIER UPSERT
-- state cursor(e1_FCT_ct.e1_2_state)로 월 전체 재스캔 방지
-- health log: k_demon_heath_check.e1_2_log
+핵심 포인트
+- batch fetch timeout 분리
+- heartbeat 전용 프로세스 분리
+- application_name 분리
+- print 는 DB 기록 뒤에만 수행
+- 커넥션 재진입 버그 수정
 """
 
 from __future__ import annotations
@@ -23,8 +22,9 @@ from __future__ import annotations
 import os
 import time as time_mod
 import urllib.parse
-from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+import multiprocessing as mp
+from datetime import date, datetime, time, timedelta
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -45,9 +45,32 @@ KST = ZoneInfo("Asia/Seoul")
 
 LOOP_INTERVAL_SEC = 5
 DB_RETRY_INTERVAL_SEC = 5
-FETCH_LIMIT = 2000
+FETCH_LIMIT_PER_DAY = int(os.getenv("E1_2_FETCH_LIMIT_PER_DAY", "200000"))
 WORK_MEM = os.getenv("PG_WORK_MEM", "4MB")
-RECOMPUTE_MIN_INTERVAL_SEC = int(os.getenv("E1_2_RECOMPUTE_MIN_SEC", "15"))
+
+APP_NAME_MAIN = os.getenv("E1_2_APP_NAME_MAIN", "e1_2_fct_runtime_ct_main")
+APP_NAME_LOG = os.getenv("E1_2_APP_NAME_LOG", "e1_2_fct_runtime_ct_log")
+APP_NAME_HEARTBEAT = os.getenv("E1_2_APP_NAME_HEARTBEAT", "e1_2_fct_runtime_ct_heartbeat")
+
+GENERAL_STATEMENT_TIMEOUT_MS = int(os.getenv("E1_2_GENERAL_STMT_TIMEOUT_MS", "60000"))
+BATCH_FETCH_TIMEOUT_MS = int(os.getenv("E1_2_BATCH_FETCH_TIMEOUT_MS", "600000"))   # 10분
+UPSERT_TIMEOUT_MS = int(os.getenv("E1_2_UPSERT_TIMEOUT_MS", "300000"))              # 5분
+LOCK_TIMEOUT_MS = int(os.getenv("PG_LOCK_TIMEOUT_MS", "5000"))
+LOG_TIMEOUT_MS = int(os.getenv("E1_2_LOG_TIMEOUT_MS", "5000"))
+
+IDLE_LOG_INTERVAL_SEC = int(os.getenv("E1_2_IDLE_LOG_INTERVAL_SEC", "60"))
+SLEEP_LOG_INTERVAL_SEC = int(os.getenv("E1_2_SLEEP_LOG_INTERVAL_SEC", "60"))
+HEARTBEAT_INTERVAL_SEC = int(os.getenv("E1_2_HEARTBEAT_INTERVAL_SEC", "60"))
+
+ENABLE_STDOUT_PRINT = os.getenv("E1_2_ENABLE_STDOUT_PRINT", "1") == "1"
+
+DAILY_BATCH_START_HMS = (
+    int(os.getenv("E1_2_BATCH_START_HOUR", "0")),
+    int(os.getenv("E1_2_BATCH_START_MINUTE", "0")),
+    int(os.getenv("E1_2_BATCH_START_SECOND", "10")),
+)
+
+STATUS_FILE = os.getenv("E1_2_STATUS_FILE", os.path.join(os.getcwd(), "e1_2_status.txt"))
 
 
 # =========================
@@ -62,11 +85,13 @@ DB_CONFIG = {
 }
 
 
-def _make_url() -> str:
+def _make_url(app_name: str) -> str:
     pwd = urllib.parse.quote_plus(DB_CONFIG["password"])
+    app = urllib.parse.quote_plus(app_name)
     return (
         f"postgresql+psycopg2://{DB_CONFIG['user']}:{pwd}"
         f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+        f"?application_name={app}"
     )
 
 
@@ -94,9 +119,11 @@ STATIONS_ALL = ["FCT1", "FCT2", "FCT3", "FCT4"]
 _DATA_ENGINE: Optional[Engine] = None
 _LOG_ENGINE: Optional[Engine] = None
 
+_LAST_LOG_TS: Dict[str, float] = {}
+
 
 # =========================
-# Logging
+# Time / Date Helpers
 # =========================
 def _ts_kst() -> datetime:
     return datetime.now(KST)
@@ -106,32 +133,182 @@ def _fmt_now() -> str:
     return _ts_kst().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _emit(level_tag: str, info: str, msg: str, persist: bool = True) -> None:
-    print(f"{_fmt_now()} [{level_tag}] {msg}", flush=True)
-    if not persist:
-        return
+def current_yyyymm(now: Optional[datetime] = None) -> str:
+    now = now or _ts_kst()
+    return now.strftime("%Y%m")
 
-    global _LOG_ENGINE
-    if _LOG_ENGINE is None:
-        return
 
+def month_start_day_str(day_str: str) -> str:
+    return day_str[:6] + "01"
+
+
+def to_day_str(d: date) -> str:
+    return d.strftime("%Y%m%d")
+
+
+def parse_day_str(s: str) -> date:
+    return datetime.strptime(s, "%Y%m%d").date()
+
+
+def yesterday_day_str(now: Optional[datetime] = None) -> str:
+    now = now or _ts_kst()
+    return to_day_str((now.date() - timedelta(days=1)))
+
+
+def batch_ready(now: Optional[datetime] = None) -> bool:
+    now = now or _ts_kst()
+    h, m, s = DAILY_BATCH_START_HMS
+    return now.timetz().replace(tzinfo=None) >= time(h, m, s)
+
+
+# =========================
+# Status file for heartbeat process
+# =========================
+def write_status_file(message: str) -> None:
     try:
-        now = _ts_kst()
-        row = {
-            "end_day": now.strftime("%Y%m%d"),
-            "end_time": now.strftime("%H:%M:%S"),
-            "info": (info or "info").lower(),
-            "contents": str(msg)[:4000],
-        }
-        sql = text(f"""
-            INSERT INTO "{LOG_SCHEMA}".{LOG_TABLE}
-            (end_day, end_time, info, contents)
-            VALUES (:end_day, :end_time, :info, :contents)
-        """)
-        with _LOG_ENGINE.begin() as conn:
-            conn.execute(sql, [row])
-    except Exception as e:
-        print(f"{_fmt_now()} [WARN] health-log insert failed: {type(e).__name__}: {e}", flush=True)
+        tmp = STATUS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(f"{_fmt_now()}|{message}")
+        os.replace(tmp, STATUS_FILE)
+    except Exception:
+        pass
+
+
+def read_status_file() -> str:
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip() or "unknown"
+    except Exception:
+        return "status_unavailable"
+
+
+# =========================
+# Session apply helpers
+# =========================
+def apply_general_session(conn) -> None:
+    conn.execute(text(f"SET work_mem = '{WORK_MEM}'"))
+    conn.execute(text(f"SET statement_timeout = '{GENERAL_STATEMENT_TIMEOUT_MS}ms'"))
+    conn.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT_MS}ms'"))
+
+
+def apply_log_session(conn) -> None:
+    conn.execute(text(f"SET work_mem = '{WORK_MEM}'"))
+    conn.execute(text(f"SET statement_timeout = '{LOG_TIMEOUT_MS}ms'"))
+    conn.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT_MS}ms'"))
+
+
+def apply_batch_fetch_session(conn) -> None:
+    conn.execute(text(f"SET work_mem = '{WORK_MEM}'"))
+    conn.execute(text(f"SET statement_timeout = '{BATCH_FETCH_TIMEOUT_MS}ms'"))
+    conn.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT_MS}ms'"))
+
+
+def apply_upsert_session(conn) -> None:
+    conn.execute(text(f"SET work_mem = '{WORK_MEM}'"))
+    conn.execute(text(f"SET statement_timeout = '{UPSERT_TIMEOUT_MS}ms'"))
+    conn.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT_MS}ms'"))
+
+
+# =========================
+# Engine builders
+# =========================
+def make_data_engine() -> Engine:
+    os.environ.setdefault("PGCLIENTENCODING", "UTF8")
+    os.environ.setdefault("PGOPTIONS", "-c client_encoding=UTF8")
+    return create_engine(
+        _make_url(APP_NAME_MAIN),
+        pool_size=1,
+        max_overflow=0,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_timeout=30,
+    )
+
+
+def make_log_engine() -> Engine:
+    os.environ.setdefault("PGCLIENTENCODING", "UTF8")
+    os.environ.setdefault("PGOPTIONS", "-c client_encoding=UTF8")
+    return create_engine(
+        _make_url(APP_NAME_LOG),
+        pool_size=1,
+        max_overflow=0,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_timeout=30,
+    )
+
+
+def make_heartbeat_engine() -> Engine:
+    os.environ.setdefault("PGCLIENTENCODING", "UTF8")
+    os.environ.setdefault("PGOPTIONS", "-c client_encoding=UTF8")
+    return create_engine(
+        _make_url(APP_NAME_HEARTBEAT),
+        pool_size=1,
+        max_overflow=1,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_timeout=10,
+    )
+
+
+# =========================
+# Logging
+# =========================
+def _should_log_rate_limited(key: str, interval_sec: int) -> bool:
+    now_ts = time_mod.time()
+    last_ts = _LAST_LOG_TS.get(key, 0.0)
+    if (now_ts - last_ts) >= interval_sec:
+        _LAST_LOG_TS[key] = now_ts
+        return True
+    return False
+
+
+def _safe_print(msg: str) -> None:
+    if not ENABLE_STDOUT_PRINT:
+        return
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
+
+
+def insert_health_log_with_engine(
+    engine: Engine,
+    level_tag: str,
+    info: str,
+    msg: str,
+) -> None:
+    now = _ts_kst()
+    row = {
+        "end_day": now.strftime("%Y%m%d"),
+        "end_time": now.strftime("%H:%M:%S"),
+        "info": (info or "info").lower(),
+        "contents": str(msg)[:4000],
+    }
+    sql = text(f"""
+        INSERT INTO "{LOG_SCHEMA}".{LOG_TABLE}
+        (end_day, end_time, info, contents)
+        VALUES (:end_day, :end_time, :info, :contents)
+    """)
+    with engine.begin() as conn:
+        apply_log_session(conn)
+        conn.execute(sql, [row])
+
+
+def _emit(level_tag: str, info: str, msg: str, persist: bool = True) -> None:
+    global _LOG_ENGINE
+    db_log_err: Optional[str] = None
+
+    if persist and _LOG_ENGINE is not None:
+        try:
+            insert_health_log_with_engine(_LOG_ENGINE, level_tag, info, msg)
+        except Exception as e:
+            db_log_err = f"{type(e).__name__}: {e}"
+
+    _safe_print(f"{_fmt_now()} [{level_tag}] {msg}")
+
+    if db_log_err:
+        _safe_print(f"{_fmt_now()} [WARN] health-log insert failed: {db_log_err}")
 
 
 def log_boot(msg: str) -> None:
@@ -154,12 +331,21 @@ def log_error(msg: str) -> None:
     _emit("WARN", "error", msg, persist=True)
 
 
-def log_sleep(msg: str) -> None:
+def log_sleep(msg: str, rate_limited: bool = False) -> None:
+    if rate_limited:
+        if _should_log_rate_limited("sleep", SLEEP_LOG_INTERVAL_SEC):
+            _emit("INFO", "sleep", msg, persist=True)
+        return
     _emit("INFO", "sleep", msg, persist=True)
 
 
+def log_heartbeat_local(msg: str) -> None:
+    if _should_log_rate_limited("heartbeat_local", IDLE_LOG_INTERVAL_SEC):
+        _emit("INFO", "heartbeat", msg, persist=True)
+
+
 # =========================
-# DB identity logger
+# DB identity / DDL
 # =========================
 def log_db_identity(engine: Engine) -> None:
     sql = """
@@ -168,51 +354,25 @@ def log_db_identity(engine: Engine) -> None:
       current_user             AS usr,
       inet_server_addr()::text AS server_ip,
       inet_server_port()       AS server_port,
-      inet_client_addr()::text AS client_ip
+      inet_client_addr()::text AS client_ip,
+      current_setting('application_name', true) AS app_name,
+      current_setting('statement_timeout', true) AS statement_timeout,
+      current_setting('lock_timeout', true) AS lock_timeout
     """
     with engine.connect() as conn:
+        apply_general_session(conn)
         row = conn.execute(text(sql)).mappings().first()
 
     log_info(
         f"[DB_ID] db={row['db']} usr={row['usr']} "
-        f"server={row['server_ip']}:{row['server_port']} client={row['client_ip']}"
+        f"server={row['server_ip']}:{row['server_port']} client={row['client_ip']} "
+        f"app={row['app_name']} stmt_to={row['statement_timeout']} lock_to={row['lock_timeout']}"
     )
-
-
-# =========================
-# Engine / Session
-# =========================
-def make_data_engine() -> Engine:
-    os.environ.setdefault("PGCLIENTENCODING", "UTF8")
-    os.environ.setdefault("PGOPTIONS", "-c client_encoding=UTF8")
-    return create_engine(
-        _make_url(),
-        pool_size=1,
-        max_overflow=0,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-    )
-
-
-def make_log_engine() -> Engine:
-    os.environ.setdefault("PGCLIENTENCODING", "UTF8")
-    os.environ.setdefault("PGOPTIONS", "-c client_encoding=UTF8")
-    return create_engine(
-        _make_url(),
-        pool_size=1,
-        max_overflow=0,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-    )
-
-
-def ensure_db_ready(engine: Engine) -> None:
-    with engine.begin() as conn:
-        conn.execute(text(f"SET work_mem = '{WORK_MEM}'"))
 
 
 def ensure_log_table(engine: Engine) -> None:
     with engine.begin() as conn:
+        apply_log_session(conn)
         conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{LOG_SCHEMA}";'))
         conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS "{LOG_SCHEMA}".{LOG_TABLE} (
@@ -232,19 +392,26 @@ def ensure_log_table(engine: Engine) -> None:
 
 def ensure_state_table(engine: Engine) -> None:
     with engine.begin() as conn:
+        apply_general_session(conn)
         conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{STATE_SCHEMA}";'))
         conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS {STATE_FQN} (
-                key         TEXT PRIMARY KEY,
-                run_month   TEXT,
-                last_end_ts TIMESTAMPTZ,
-                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                key                TEXT PRIMARY KEY,
+                run_month          TEXT,
+                last_end_ts        TIMESTAMPTZ,
+                last_processed_day TEXT,
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+        """))
+        conn.execute(text(f"""
+            ALTER TABLE {STATE_FQN}
+            ADD COLUMN IF NOT EXISTS last_processed_day TEXT;
         """))
 
 
 def ensure_target_tables(engine: Engine) -> None:
     with engine.begin() as conn:
+        apply_general_session(conn)
         conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{TARGET_SCHEMA}";'))
 
         conn.execute(text(f"""
@@ -316,61 +483,69 @@ def ensure_target_tables(engine: Engine) -> None:
 # =========================
 # State
 # =========================
-def current_yyyymm(now: Optional[datetime] = None) -> str:
-    now = now or _ts_kst()
-    return now.strftime("%Y%m")
-
-
-def today_yyyymmdd() -> str:
-    return _ts_kst().strftime("%Y%m%d")
-
-
-def month_start_ts(run_month: str) -> datetime:
-    y = int(run_month[:4])
-    m = int(run_month[4:6])
-    return datetime(y, m, 1, 0, 0, 0, tzinfo=KST)
-
-
-def load_state(engine: Engine) -> Tuple[Optional[str], Optional[datetime]]:
-    sql = text(f"SELECT run_month, last_end_ts FROM {STATE_FQN} WHERE key=:k")
+def load_state(engine: Engine) -> Tuple[Optional[str], Optional[datetime], Optional[str]]:
+    sql = text(f"""
+        SELECT run_month, last_end_ts, last_processed_day
+        FROM {STATE_FQN}
+        WHERE key=:k
+    """)
     with engine.connect() as conn:
+        apply_general_session(conn)
         row = conn.execute(sql, {"k": STATE_KEY}).mappings().first()
 
     if not row:
-        return None, None
-    return row["run_month"], row["last_end_ts"]
+        return None, None, None
+    return row["run_month"], row["last_end_ts"], row["last_processed_day"]
 
 
-def save_state(engine: Engine, run_month: str, last_end_ts: Optional[datetime]) -> None:
+def save_state(
+    engine: Engine,
+    run_month: str,
+    last_end_ts: Optional[datetime],
+    last_processed_day: Optional[str],
+) -> None:
     sql = text(f"""
-        INSERT INTO {STATE_FQN} (key, run_month, last_end_ts)
-        VALUES (:k, :m, :ts)
+        INSERT INTO {STATE_FQN} (key, run_month, last_end_ts, last_processed_day)
+        VALUES (:k, :m, :ts, :d)
         ON CONFLICT (key) DO UPDATE SET
-          run_month   = EXCLUDED.run_month,
-          last_end_ts = EXCLUDED.last_end_ts,
-          updated_at  = now()
+          run_month          = EXCLUDED.run_month,
+          last_end_ts        = EXCLUDED.last_end_ts,
+          last_processed_day = EXCLUDED.last_processed_day,
+          updated_at         = now()
     """)
     with engine.begin() as conn:
-        conn.execute(sql, {"k": STATE_KEY, "m": run_month, "ts": last_end_ts})
+        apply_general_session(conn)
+        conn.execute(
+            sql,
+            {
+                "k": STATE_KEY,
+                "m": run_month,
+                "ts": last_end_ts,
+                "d": last_processed_day,
+            },
+        )
 
 
 # =========================
-# Fetch
+# Timeout helper
 # =========================
-def fetch_incremental(engine: Engine, stations: List[str], run_month: str, cursor_ts: datetime) -> pd.DataFrame:
-    """
-    end_time 지원 형식:
-    - 205836
-    - 03:23:13
-    - 205836.123
-    - 03:23:13.123
+def _is_statement_timeout_error(exc: Exception) -> bool:
+    s = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        "querycanceled" in s
+        or "statement timeout" in s
+        or "canceling statement due to statement timeout" in s
+        or "명령실행시간 초과" in s
+        or "작업을 취소합니다" in s
+    )
 
-    처리 방식:
-    1) end_day 숫자만 추출 -> 8자리만 허용
-    2) end_time 숫자만 추출 -> 6자리만 허용
-    3) HH/MM/SS 범위 검증
-    4) HH:MM:SS 로 재조합 후 to_timestamp
-    """
+
+# =========================
+# Fetch - day based
+# =========================
+def fetch_one_day(engine: Engine, stations: List[str], target_day: str) -> pd.DataFrame:
+    run_month = target_day[:6]
+
     q = text(f"""
     WITH base AS (
         SELECT
@@ -394,6 +569,8 @@ def fetch_incremental(engine: Engine, stations: List[str], run_month: str, curso
                 OR
                 (remark = 'Non-PD' AND step_description = '1.32 Test iqz(uA)')
             )
+            AND substring(regexp_replace(COALESCE(end_day::text, ''), '\\D', '', 'g') from 1 for 6) = :run_month
+            AND regexp_replace(COALESCE(end_day::text, ''), '\\D', '', 'g') = :target_day
     ),
     valid AS (
         SELECT
@@ -417,10 +594,9 @@ def fetch_incremental(engine: Engine, stations: List[str], run_month: str, curso
         FROM base
         WHERE
             length(end_day_digits) = 8
-            AND end_day_digits ~ '^[0-9]{8}$'
-            AND substring(end_day_digits from 1 for 6) = :run_month
+            AND end_day_digits ~ '^[0-9]{{8}}$'
             AND length(end_time_digits) = 6
-            AND end_time_digits ~ '^[0-9]{6}$'
+            AND end_time_digits ~ '^[0-9]{{6}}$'
             AND substring(end_time_digits from 1 for 2)::int BETWEEN 0 AND 23
             AND substring(end_time_digits from 3 for 2)::int BETWEEN 0 AND 59
             AND substring(end_time_digits from 5 for 2)::int BETWEEN 0 AND 59
@@ -439,21 +615,20 @@ def fetch_incremental(engine: Engine, stations: List[str], run_month: str, curso
         run_time,
         end_ts
     FROM valid
-    WHERE end_ts >= :cursor_ts
     ORDER BY end_ts ASC, file_path ASC
     LIMIT :limit
     """)
 
     with engine.connect() as conn:
-        conn.execute(text(f"SET work_mem = '{WORK_MEM}'"))
+        apply_batch_fetch_session(conn)
         df = pd.read_sql_query(
             q,
             conn,
             params={
                 "stations": stations,
                 "run_month": run_month,
-                "cursor_ts": cursor_ts,
-                "limit": FETCH_LIMIT,
+                "target_day": target_day,
+                "limit": FETCH_LIMIT_PER_DAY,
             },
         )
 
@@ -471,6 +646,39 @@ def fetch_incremental(engine: Engine, stations: List[str], run_month: str, curso
     df["month"] = df["end_day"].str.slice(0, 6)
 
     return df
+
+
+def month_days_upto(target_day: str) -> List[str]:
+    start_day = parse_day_str(month_start_day_str(target_day))
+    end_day = parse_day_str(target_day)
+    cur = start_day
+    out: List[str] = []
+    while cur <= end_day:
+        out.append(to_day_str(cur))
+        cur += timedelta(days=1)
+    return out
+
+
+def build_month_df_upto(engine: Engine, stations: List[str], target_day: str) -> pd.DataFrame:
+    parts: List[pd.DataFrame] = []
+    days = month_days_upto(target_day)
+
+    log_info(f"[BATCH] build month dataset start month={target_day[:6]} days={len(days)} upto={target_day}")
+    write_status_file(f"batch_running build_month month={target_day[:6]} upto={target_day} days={len(days)}")
+
+    for d in days:
+        write_status_file(f"batch_running day_fetch={d}")
+        df_day = fetch_one_day(engine, stations, d)
+        log_info(f"[DAY_FETCH] day={d} rows={len(df_day)}")
+        if not df_day.empty:
+            parts.append(df_day)
+
+    if not parts:
+        return pd.DataFrame()
+
+    out = pd.concat(parts, ignore_index=True)
+    out = out.drop_duplicates(subset=["file_path"], keep="last").reset_index(drop=True)
+    return out
 
 
 # =========================
@@ -635,6 +843,7 @@ def upsert_latest(engine: Engine, summary_df: pd.DataFrame) -> None:
         updated_at             = now()
     """)
     with engine.begin() as conn:
+        apply_upsert_session(conn)
         conn.execute(sql, rows)
 
 
@@ -680,6 +889,7 @@ def upsert_hist(engine: Engine, summary_df: pd.DataFrame, snapshot_day: str) -> 
         plotly_json            = EXCLUDED.plotly_json
     """)
     with engine.begin() as conn:
+        apply_upsert_session(conn)
         conn.execute(sql, rows)
 
 
@@ -703,6 +913,7 @@ def insert_outliers(engine: Engine, outlier_df: pd.DataFrame) -> None:
     DO NOTHING
     """)
     with engine.begin() as conn:
+        apply_upsert_session(conn)
         conn.execute(sql, rows)
 
 
@@ -717,8 +928,11 @@ def connect_blocking() -> Tuple[Engine, Engine]:
 
     while True:
         try:
-            ensure_db_ready(data_engine)
-            ensure_db_ready(log_engine)
+            with data_engine.connect() as conn:
+                apply_general_session(conn)
+            with log_engine.connect() as conn:
+                apply_log_session(conn)
+
             ensure_log_table(log_engine)
 
             _DATA_ENGINE = data_engine
@@ -732,8 +946,7 @@ def connect_blocking() -> Tuple[Engine, Engine]:
         except Exception as e:
             _DATA_ENGINE = None
             _LOG_ENGINE = None
-            log_retry(f"DB connect failed: {type(e).__name__}: {e}")
-            log_sleep(f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect")
+            _safe_print(f"{_fmt_now()} [RETRY] DB connect failed: {type(e).__name__}: {e}")
             time_mod.sleep(DB_RETRY_INTERVAL_SEC)
 
             data_engine = make_data_engine()
@@ -743,7 +956,7 @@ def connect_blocking() -> Tuple[Engine, Engine]:
 def reconnect_data_engine() -> Tuple[Engine, Engine]:
     while True:
         try:
-            log_sleep(f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect")
+            log_sleep(f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect", rate_limited=True)
             time_mod.sleep(DB_RETRY_INTERVAL_SEC)
 
             data_engine, log_engine = connect_blocking()
@@ -758,11 +971,105 @@ def reconnect_data_engine() -> Tuple[Engine, Engine]:
             log_retry(f"reconnect failed: {type(e).__name__}: {e}")
 
 
+def missing_days_to_process(last_processed_day: Optional[str], target_day: str) -> List[str]:
+    target_dt = parse_day_str(target_day)
+    month_start_dt = parse_day_str(month_start_day_str(target_day))
+
+    if not last_processed_day:
+        start_dt = month_start_dt
+    else:
+        last_dt = parse_day_str(last_processed_day)
+        if last_dt >= target_dt:
+            return []
+        if last_dt < month_start_dt:
+            start_dt = month_start_dt
+        else:
+            start_dt = last_dt + timedelta(days=1)
+
+    out: List[str] = []
+    cur = start_dt
+    while cur <= target_dt:
+        out.append(to_day_str(cur))
+        cur += timedelta(days=1)
+    return out
+
+
+def run_daily_batch(
+    engine: Engine,
+    last_processed_day: Optional[str],
+    target_day: str,
+) -> str:
+    to_process = missing_days_to_process(last_processed_day, target_day)
+
+    if not to_process:
+        log_info(f"[BATCH] already up-to-date target_day={target_day}")
+        write_status_file(f"idle up_to_date target_day={target_day}")
+        return last_processed_day or target_day
+
+    log_info(
+        f"[BATCH] start target_day={target_day} "
+        f"last_processed_day={last_processed_day} "
+        f"missing_days={len(to_process)} first={to_process[0]} last={to_process[-1]}"
+    )
+    write_status_file(
+        f"batch_running target_day={target_day} "
+        f"last_processed_day={last_processed_day} "
+        f"missing_days={len(to_process)}"
+    )
+
+    month_df = build_month_df_upto(engine, STATIONS_ALL, target_day)
+
+    write_status_file(f"batch_running build_summary target_day={target_day} rows={len(month_df)}")
+    summary_df = build_summary_df(month_df)
+    outlier_df = build_upper_outlier_df(month_df, summary_df)
+
+    write_status_file(f"batch_running upsert target_day={target_day} groups={len(summary_df)} outliers={len(outlier_df)}")
+    upsert_latest(engine, summary_df)
+    upsert_hist(engine, summary_df, snapshot_day=target_day)
+    insert_outliers(engine, outlier_df)
+
+    log_info(
+        f"[BATCH] done target_day={target_day} "
+        f"rows={len(month_df)} groups={len(summary_df)} outliers={len(outlier_df)}"
+    )
+    write_status_file(f"idle batch_done target_day={target_day}")
+    return target_day
+
+
+# =========================
+# Heartbeat process
+# =========================
+def heartbeat_worker() -> None:
+    engine: Optional[Engine] = None
+
+    while True:
+        try:
+            if engine is None:
+                engine = make_heartbeat_engine()
+                ensure_log_table(engine)
+
+            status = read_status_file()
+            msg = f"alive {status}"
+
+            insert_health_log_with_engine(engine, "INFO", "heartbeat", msg)
+            _safe_print(f"{_fmt_now()} [INFO] HEARTBEAT {msg}")
+
+        except Exception as e:
+            _safe_print(f"{_fmt_now()} [WARN] heartbeat worker error: {type(e).__name__}: {e}")
+            engine = None
+
+        time_mod.sleep(HEARTBEAT_INTERVAL_SEC)
+
+
 # =========================
 # Main
 # =========================
 def main() -> None:
-    log_boot("e1_2 fct_runtime_ct daemon starting (backend3-style connect, fixed end_time parse)")
+    write_status_file("booting")
+    log_boot("e1_2 fct_runtime_ct daemon starting (daily batch mode + heartbeat process)")
+
+    heartbeat_proc = mp.Process(target=heartbeat_worker, name="e1_2_heartbeat", daemon=True)
+    heartbeat_proc.start()
 
     data_engine, _ = connect_blocking()
 
@@ -774,43 +1081,43 @@ def main() -> None:
             log_info(f'target tables ready: "{TARGET_SCHEMA}".*')
             break
         except OperationalError as e:
-            log_retry(f"DDL DB connection error: {type(e).__name__}: {e}")
-            data_engine, _ = reconnect_data_engine()
+            if _is_statement_timeout_error(e):
+                log_warn(f"DDL statement timeout: {type(e).__name__}: {e}")
+                time_mod.sleep(DB_RETRY_INTERVAL_SEC)
+            else:
+                log_retry(f"DDL DB connection error: {type(e).__name__}: {e}")
+                data_engine, _ = reconnect_data_engine()
         except DBAPIError as e:
-            log_warn(f"DDL SQL/data error: {type(e).__name__}: {e}")
+            if _is_statement_timeout_error(e):
+                log_warn(f"DDL statement timeout: {type(e).__name__}: {e}")
+            else:
+                log_warn(f"DDL SQL/data error: {type(e).__name__}: {e}")
             time_mod.sleep(DB_RETRY_INTERVAL_SEC)
         except Exception as e:
             log_warn(f"DDL unexpected error: {type(e).__name__}: {e}")
             time_mod.sleep(DB_RETRY_INTERVAL_SEC)
 
     run_month = current_yyyymm()
-    st_month, st_ts = (None, None)
+    last_end_ts: Optional[datetime] = None
+    last_processed_day: Optional[str] = None
 
     try:
-        st_month, st_ts = load_state(data_engine)
+        st_month, st_ts, st_last_day = load_state(data_engine)
+        run_month = st_month or run_month
+        last_end_ts = st_ts
+        last_processed_day = st_last_day
+        log_info(
+            f"[STATE] loaded run_month={run_month} "
+            f"last_end_ts={last_end_ts} last_processed_day={last_processed_day}"
+        )
     except OperationalError as e:
-        log_retry(f"state load connection error: {type(e).__name__}: {e}")
-        data_engine, _ = reconnect_data_engine()
-    except Exception as e:
-        log_warn(f"state load failed, fallback to month start: {type(e).__name__}: {e}")
-
-    if st_month != run_month:
-        cursor_ts = month_start_ts(run_month)
-        try:
-            save_state(data_engine, run_month, cursor_ts)
-        except OperationalError as e:
-            log_retry(f"state init save connection error: {type(e).__name__}: {e}")
+        if _is_statement_timeout_error(e):
+            log_warn(f"state load statement timeout: {type(e).__name__}: {e}")
+        else:
+            log_retry(f"state load connection error: {type(e).__name__}: {e}")
             data_engine, _ = reconnect_data_engine()
-            save_state(data_engine, run_month, cursor_ts)
-        except Exception as e:
-            log_warn(f"state init save failed: {type(e).__name__}: {e}")
-        log_info(f"[STATE] init cursor for {run_month}: {cursor_ts}")
-    else:
-        cursor_ts = st_ts or month_start_ts(run_month)
-        log_info(f"[STATE] loaded cursor: month={st_month} ts={cursor_ts}")
-
-    cache_df: Optional[pd.DataFrame] = None
-    last_recompute_ts = 0.0
+    except Exception as e:
+        log_warn(f"state load failed: {type(e).__name__}: {e}")
 
     while True:
         loop_start = time_mod.time()
@@ -818,64 +1125,78 @@ def main() -> None:
         try:
             now = _ts_kst()
             cur_month = current_yyyymm(now)
+            target_day = yesterday_day_str(now)
 
-            if cur_month != run_month:
-                log_info(f"[ROLLOVER] month {run_month} -> {cur_month} | reset cache/state")
-                run_month = cur_month
-                cache_df = None
-                cursor_ts = month_start_ts(run_month)
-                save_state(data_engine, run_month, cursor_ts)
+            if batch_ready(now):
+                write_status_file(
+                    f"ready_for_batch now={now.strftime('%H:%M:%S')} "
+                    f"target_day={target_day} last_processed_day={last_processed_day}"
+                )
 
-            df_new = fetch_incremental(data_engine, STATIONS_ALL, run_month, cursor_ts)
+                new_last_processed_day = run_daily_batch(
+                    data_engine,
+                    last_processed_day=last_processed_day,
+                    target_day=target_day,
+                )
 
-            if df_new is None or df_new.empty:
-                log_info("no new rows")
+                if new_last_processed_day != last_processed_day:
+                    last_processed_day = new_last_processed_day
+                    run_month = new_last_processed_day[:6]
+                    save_state(
+                        data_engine,
+                        run_month=run_month,
+                        last_end_ts=last_end_ts,
+                        last_processed_day=last_processed_day,
+                    )
+                    log_info(
+                        f"[STATE] saved run_month={run_month} "
+                        f"last_processed_day={last_processed_day}"
+                    )
+                else:
+                    log_heartbeat_local(
+                        f"alive waiting next daily batch current_month={cur_month} "
+                        f"last_processed_day={last_processed_day}"
+                    )
             else:
-                if cache_df is None or cache_df.empty:
-                    cache_df = df_new.copy()
-                else:
-                    cache_df = pd.concat([cache_df, df_new], ignore_index=True)
-                    cache_df = cache_df.drop_duplicates(subset=["file_path"], keep="last").reset_index(drop=True)
-
-                max_ts = pd.to_datetime(df_new["end_ts"]).max()
-                if pd.notna(max_ts):
-                    cursor_ts = max_ts.to_pydatetime() - timedelta(seconds=1)
-                    save_state(data_engine, run_month, cursor_ts)
-
-                log_info(f"new={len(df_new)} cache={len(cache_df)} cursor={cursor_ts}")
-
-                now_ts = time_mod.time()
-                if (now_ts - last_recompute_ts) >= RECOMPUTE_MIN_INTERVAL_SEC:
-                    snapshot_day = today_yyyymmdd()
-                    summary_df = build_summary_df(cache_df)
-                    outlier_df = build_upper_outlier_df(cache_df, summary_df)
-
-                    upsert_latest(data_engine, summary_df)
-                    upsert_hist(data_engine, summary_df, snapshot_day=snapshot_day)
-                    insert_outliers(data_engine, outlier_df)
-
-                    last_recompute_ts = now_ts
-                    log_info(f"[UPSERT] done | groups={len(summary_df)} outliers={len(outlier_df)}")
-                else:
-                    log_info(f"[SKIP] recompute throttled ({RECOMPUTE_MIN_INTERVAL_SEC}s)")
+                write_status_file(
+                    f"idle waiting_batch_window start="
+                    f"{DAILY_BATCH_START_HMS[0]:02d}:{DAILY_BATCH_START_HMS[1]:02d}:{DAILY_BATCH_START_HMS[2]:02d} "
+                    f"now={now.strftime('%H:%M:%S')} last_processed_day={last_processed_day}"
+                )
+                log_heartbeat_local(
+                    f"alive waiting batch_window start="
+                    f"{DAILY_BATCH_START_HMS[0]:02d}:{DAILY_BATCH_START_HMS[1]:02d}:{DAILY_BATCH_START_HMS[2]:02d} "
+                    f"now={now.strftime('%H:%M:%S')} last_processed_day={last_processed_day}"
+                )
 
         except OperationalError as e:
-            log_retry(f"DB connection error: {type(e).__name__}: {e}")
-            data_engine, _ = reconnect_data_engine()
+            if _is_statement_timeout_error(e):
+                write_status_file("warn statement_timeout during daily batch")
+                log_warn(f"statement timeout during daily batch: {type(e).__name__}: {e}")
+            else:
+                write_status_file("retry db_connection_error")
+                log_retry(f"DB connection error: {type(e).__name__}: {e}")
+                data_engine, _ = reconnect_data_engine()
 
         except DBAPIError as e:
-            # SQL/Data 문제는 down 처리하지 않음
-            log_warn(f"SQL/data error: {type(e).__name__}: {e}")
+            if _is_statement_timeout_error(e):
+                write_status_file("warn statement_timeout during daily batch")
+                log_warn(f"statement timeout during daily batch: {type(e).__name__}: {e}")
+            else:
+                write_status_file("warn sql_data_error")
+                log_warn(f"SQL/data error: {type(e).__name__}: {e}")
 
         except Exception as e:
+            write_status_file("error unhandled_exception")
             log_error(f"Unhandled error: {type(e).__name__}: {e}")
 
         elapsed = time_mod.time() - loop_start
         sleep_sec = max(0.0, LOOP_INTERVAL_SEC - elapsed)
         if sleep_sec > 0:
-            log_sleep(f"loop sleep {sleep_sec:.2f}s")
+            log_sleep(f"loop sleep {sleep_sec:.2f}s", rate_limited=True)
             time_mod.sleep(sleep_sec)
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     main()
