@@ -81,7 +81,7 @@ DB_CONFIG = {
     "port": int(os.getenv("PG_PORT", "5432")),
     "dbname": os.getenv("PG_DBNAME", "postgres"),
     "user": os.getenv("PG_USER", "postgres"),
-    "password": os.getenv("PG_PASSWORD", ""),  # TODO: 보안
+    "password": os.getenv("PG_PASSWORD", "leejangwoo1!"),  # TODO: 보안
 }
 
 SRC_SCHEMA = "g_production_film"
@@ -132,9 +132,9 @@ def setup_logger():
         fh.setFormatter(fmt)
         fh.setLevel(logging.INFO)
         logger.addHandler(fh)
-        logger.info(Demon_f"[LOG] file logging enabled: {LOG_FILE}")
+        logger.info(f"[LOG] file logging enabled: {LOG_FILE}")
     except Exception as e:
-        logger.warning(Demon_f"[LOG] file logging disabled (cannot open {LOG_FILE}): {type(e).__name__}: {e}")
+        logger.warning(f"[LOG] file logging disabled (cannot open {LOG_FILE}): {type(e).__name__}: {e}")
 
 
 def _normalize_info(info: str) -> str:
@@ -164,8 +164,8 @@ def _health_row(info: str, contents: str, now: Optional[datetime] = None) -> Dic
 
 
 def _ensure_health_table(engine: Engine):
-    ddl_schema = Demon_f'CREATE SCHEMA IF NOT EXISTS "{HEALTH_SCHEMA}";'
-    ddl_table = Demon_f"""
+    ddl_schema = f'CREATE SCHEMA IF NOT EXISTS "{HEALTH_SCHEMA}";'
+    ddl_table = f"""
     CREATE TABLE IF NOT EXISTS "{HEALTH_SCHEMA}"."{HEALTH_TABLE}" (
         "end_day" text,
         "end_time" text,
@@ -186,7 +186,7 @@ def _save_health_logs_df(engine: Engine, rows: List[Dict[str, str]]):
     df = pd.DataFrame(rows, columns=cols)
     recs = df.to_dict(orient="records")
 
-    sql = text(Demon_f"""
+    sql = text(f"""
         INSERT INTO "{HEALTH_SCHEMA}"."{HEALTH_TABLE}"
         ("end_day","end_time","info","contents")
         VALUES (:end_day, :end_time, :info, :contents)
@@ -211,7 +211,7 @@ def log(level: str, msg: str):
 
 def log_exception(prefix: str, e: Exception):
     tb = traceback.format_exc()
-    logger.error(Demon_f"{prefix}: {type(e).__name__}: {e}\n{tb}")
+    logger.error(f"{prefix}: {type(e).__name__}: {e}\n{tb}")
 
 
 # =========================
@@ -219,8 +219,8 @@ def log_exception(prefix: str, e: Exception):
 # =========================
 def make_engine() -> Engine:
     url = (
-        Demon_f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
-        Demon_f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+        f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
+        f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
     )
     return create_engine(
         url,
@@ -240,10 +240,10 @@ def make_engine() -> Engine:
 
 
 def set_session(conn):
-    conn.execute(text(Demon_f"SET work_mem TO '{PG_WORK_MEM}';"))
-    conn.execute(text(Demon_f"SET statement_timeout TO {PG_STATEMENT_TIMEOUT_MS};"))
-    conn.execute(text(Demon_f"SET lock_timeout TO {PG_LOCK_TIMEOUT_MS};"))
-    conn.execute(text(Demon_f"SET idle_in_transaction_session_timeout TO {PG_IDLE_IN_TX_TIMEOUT_MS};"))
+    conn.execute(text(f"SET work_mem TO '{PG_WORK_MEM}';"))
+    conn.execute(text(f"SET statement_timeout TO {PG_STATEMENT_TIMEOUT_MS};"))
+    conn.execute(text(f"SET lock_timeout TO {PG_LOCK_TIMEOUT_MS};"))
+    conn.execute(text(f"SET idle_in_transaction_session_timeout TO {PG_IDLE_IN_TX_TIMEOUT_MS};"))
 
 
 def connect_with_retry() -> Engine:
@@ -253,10 +253,10 @@ def connect_with_retry() -> Engine:
             with eng.begin() as conn:
                 set_session(conn)
                 conn.execute(text("SELECT 1;"))
-            log("INFO", Demon_f"DB connected (work_mem={PG_WORK_MEM}, stmt_timeout={PG_STATEMENT_TIMEOUT_MS}ms)")
+            log("INFO", f"DB connected (work_mem={PG_WORK_MEM}, stmt_timeout={PG_STATEMENT_TIMEOUT_MS}ms)")
             return eng
         except Exception as e:
-            log("RETRY", Demon_f"DB connect failed: {type(e).__name__}: {e} (sleep {SLEEP_SEC}s)")
+            log("RETRY", f"DB connect failed: {type(e).__name__}: {e} (sleep {SLEEP_SEC}s)")
             time.sleep(SLEEP_SEC)
 
 
@@ -317,11 +317,11 @@ def sec_to_kor_str(total_sec: int) -> str:
     s = total_sec % 60
     parts = []
     if h:
-        parts.append(Demon_f"{h}시간")
+        parts.append(f"{h}시간")
     if m:
-        parts.append(Demon_f"{m}분")
+        parts.append(f"{m}분")
     if s or not parts:
-        parts.append(Demon_f"{s}초")
+        parts.append(f"{s}초")
     return " ".join(parts)
 
 
@@ -479,7 +479,7 @@ def offset_to_hms(off: Decimal) -> str:
     hh = sec_in_day // 3600
     mm = (sec_in_day % 3600) // 60
     ss = sec_in_day % 60
-    return Demon_f"{hh:02d}:{mm:02d}:{ss:02d}"
+    return f"{hh:02d}:{mm:02d}:{ss:02d}"
 
 
 # =========================
@@ -488,7 +488,7 @@ def offset_to_hms(off: Decimal) -> str:
 def planned_fetch_for_window(engine: Engine, prod_day: str) -> pd.DataFrame:
     d0 = parse_yyyymmdd(prod_day)
     d1 = d0 + timedelta(days=1)
-    sql = text(Demon_f"""
+    sql = text(f"""
         SELECT end_day, from_time, to_time, reason
         FROM {SRC_SCHEMA}.{T_PLANNED}
         WHERE end_day IN (:day0, :day1)
@@ -501,7 +501,7 @@ def planned_fetch_for_window(engine: Engine, prod_day: str) -> pd.DataFrame:
 def fct_nonop_bootstrap(engine: Engine, prod_day: str) -> pd.DataFrame:
     d0 = parse_yyyymmdd(prod_day)
     d1 = d0 + timedelta(days=1)
-    sql = text(Demon_f"""
+    sql = text(f"""
         SELECT end_day, station, from_time, to_time
         FROM {SRC_SCHEMA}.{T_FCT_NONOP}
         WHERE end_day IN (:day0, :day1)
@@ -517,7 +517,7 @@ def fct_nonop_incremental(engine: Engine, prod_day: str, last_pk: Tuple[str, str
     d0 = parse_yyyymmdd(prod_day)
     d1 = d0 + timedelta(days=1)
     e, s, f = last_pk
-    sql = text(Demon_f"""
+    sql = text(f"""
         SELECT end_day, station, from_time, to_time
         FROM {SRC_SCHEMA}.{T_FCT_NONOP}
         WHERE end_day IN (:day0, :day1)
@@ -535,7 +535,7 @@ def fct_nonop_incremental(engine: Engine, prod_day: str, last_pk: Tuple[str, str
 
 
 def db_station_stats_for_days(engine: Engine, day0: str, day1: str) -> Dict[str, Any]:
-    sql = text(Demon_f"""
+    sql = text(f"""
         SELECT station,
                count(*) AS cnt,
                min(from_time) AS min_from,
@@ -714,7 +714,7 @@ def nonop_summary_overlap_spec_from_rows(rows_df: pd.DataFrame, planned_df: pd.D
 def ensure_schema(engine: Engine, schema: str):
     with engine.begin() as conn:
         set_session(conn)
-        conn.execute(text(Demon_f'CREATE SCHEMA IF NOT EXISTS "{schema}";'))
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}";'))
 
 
 def _col_type(col: str) -> str:
@@ -726,10 +726,10 @@ def _col_type(col: str) -> str:
 
 
 def ensure_table(engine: Engine, schema: str, table: str, columns: List[str], key_cols: List[str]):
-    ddl_cols = [Demon_f'"{c}" {_col_type(c)}' for c in columns]
+    ddl_cols = [f'"{c}" {_col_type(c)}' for c in columns]
     ddl_cols_sql = ",\n  ".join(ddl_cols)
-    key_sql = ", ".join([Demon_f'"{c}"' for c in key_cols])
-    ddl = Demon_f"""
+    key_sql = ", ".join([f'"{c}"' for c in key_cols])
+    ddl = f"""
     CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (
       {ddl_cols_sql},
       CONSTRAINT "{table}__uk" UNIQUE ({key_sql})
@@ -742,18 +742,18 @@ def ensure_table(engine: Engine, schema: str, table: str, columns: List[str], ke
 
 def upsert_df(engine: Engine, schema: str, table: str, df: pd.DataFrame, key_cols: List[str]):
     if df is None or df.empty:
-        log("INFO", Demon_f"[SKIP] upsert {schema}.{table} (df empty)")
+        log("INFO", f"[SKIP] upsert {schema}.{table} (df empty)")
         return
 
     cols = list(df.columns)
     non_keys = [c for c in cols if c not in key_cols]
 
-    col_sql = ", ".join([Demon_f'"{c}"' for c in cols])
-    bind_keys = [Demon_f"p{i}" for i in range(len(cols))]
-    val_sql = ", ".join([Demon_f":{bk}" for bk in bind_keys])
-    set_sql = ", ".join([Demon_f'"{c}" = EXCLUDED."{c}"' for c in non_keys])
+    col_sql = ", ".join([f'"{c}"' for c in cols])
+    bind_keys = [f"p{i}" for i in range(len(cols))]
+    val_sql = ", ".join([f":{bk}" for bk in bind_keys])
+    set_sql = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in non_keys])
 
-    sql = text(Demon_f"""
+    sql = text(f"""
         INSERT INTO "{schema}"."{table}" ({col_sql})
         VALUES ({val_sql})
         ON CONFLICT ({", ".join([f'"{c}"' for c in key_cols])})
@@ -769,7 +769,7 @@ def upsert_df(engine: Engine, schema: str, table: str, df: pd.DataFrame, key_col
         set_session(conn)
         conn.execute(sql, records)
 
-    log("INFO", Demon_f"[UPSERT] {schema}.{table} rows={len(df)}")
+    log("INFO", f"[UPSERT] {schema}.{table} rows={len(df)}")
 
 
 # =========================
@@ -810,17 +810,17 @@ def should_snapshot(diag: Dict[str, Any], prev_total_vision: Optional[int], last
     total_now = int(vision.get("total_after", v1_after + v2_after))
 
     if fct4 >= SNAP_FCT4_MIN_SEC and (fct1 + fct2 + fct3) <= SNAP_FCT123_MAX_SEC:
-        return True, Demon_f"pattern_a_fct4_big_fct123_small fct4={fct4} fct123={fct1+fct2+fct3}"
+        return True, f"pattern_a_fct4_big_fct123_small fct4={fct4} fct123={fct1+fct2+fct3}"
 
     if prev_total_vision is not None and prev_total_vision > 0:
         drop = (prev_total_vision - total_now) / float(prev_total_vision)
         if drop >= SNAP_DROP_RATIO:
-            return True, Demon_f"pattern_b_total_drop prev={prev_total_vision} now={total_now} drop={drop:.2f}"
+            return True, f"pattern_b_total_drop prev={prev_total_vision} now={total_now} drop={drop:.2f}"
 
     planned = diag.get("planned", {}) or {}
     planned_sec = int(planned.get("planned_sec", 0))
     if planned_sec > 0 and ((v1_after == 0 and fct1 > 0 and fct2 > 0) or (v2_after == 0 and fct3 > 0 and fct4 > 0)):
-        return True, Demon_f"pattern_c_vision_zero_with_planned planned_sec={planned_sec} v1={v1_after} v2={v2_after}"
+        return True, f"pattern_c_vision_zero_with_planned planned_sec={planned_sec} v1={v1_after} v2={v2_after}"
 
     return False, "no_trigger"
 
@@ -928,14 +928,14 @@ def snapshot_dump(
     try:
         db_stats = db_station_stats_for_days(engine, day0, day1)
     except Exception as e:
-        db_stats = {"error": Demon_f"{type(e).__name__}: {e}"}
+        db_stats = {"error": f"{type(e).__name__}: {e}"}
 
     w0, w1 = window_offsets_now(cur_window.prod_day, cur_window.shift_type, now)
 
     try:
         edge_samples = _edge_sample_rows_offsets(nonop_cache_df, cur_window.prod_day, cur_window.shift_type, w0, w1)
     except Exception as e:
-        edge_samples = {"error": Demon_f"{type(e).__name__}: {e}"}
+        edge_samples = {"error": f"{type(e).__name__}: {e}"}
 
     header = {
         "ts": now.isoformat(),
@@ -949,20 +949,20 @@ def snapshot_dump(
     }
 
     payloads = [
-        ("snapshot", Demon_f"HEADER {header}"),
-        ("snapshot_cache", Demon_f"cache_rows={len(nonop_cache_df)} cache_station_counts={cache_sc} pks_tail={pks_tail}"),
-        ("snapshot_inc", Demon_f"inc_raw_rows={len(inc_df)} inc_station_counts={inc_sc} new_station_counts={new_station_counts}"),
-        ("snapshot_planned", Demon_f"planned_rows={len(planned_df)} planned_diag={diag.get('planned')}"),
-        ("snapshot_calc", Demon_f"calc_diag={{window:{diag.get('window')}, "
-                          Demon_f"fct_raw_before_sec:{diag.get('fct_raw_before_sec')}, "
-                          Demon_f"fct_after_sec:{diag.get('fct_after_sec')}, "
-                          Demon_f"fct_removed_by_planned_sec:{diag.get('fct_removed_by_planned_sec')}, "
-                          Demon_f"vision:{diag.get('vision')}}}"),
-        ("snapshot_db", Demon_f"db_station_stats(day0={day0},day1={day1})={db_stats}"),
-        ("snapshot_rows", Demon_f"edge_samples={edge_samples}"),
+        ("snapshot", f"HEADER {header}"),
+        ("snapshot_cache", f"cache_rows={len(nonop_cache_df)} cache_station_counts={cache_sc} pks_tail={pks_tail}"),
+        ("snapshot_inc", f"inc_raw_rows={len(inc_df)} inc_station_counts={inc_sc} new_station_counts={new_station_counts}"),
+        ("snapshot_planned", f"planned_rows={len(planned_df)} planned_diag={diag.get('planned')}"),
+        ("snapshot_calc", f"calc_diag={{window:{diag.get('window')}, "
+                          f"fct_raw_before_sec:{diag.get('fct_raw_before_sec')}, "
+                          f"fct_after_sec:{diag.get('fct_after_sec')}, "
+                          f"fct_removed_by_planned_sec:{diag.get('fct_removed_by_planned_sec')}, "
+                          f"vision:{diag.get('vision')}}}"),
+        ("snapshot_db", f"db_station_stats(day0={day0},day1={day1})={db_stats}"),
+        ("snapshot_rows", f"edge_samples={edge_samples}"),
     ]
 
-    log("WARNING", Demon_f"[SNAPSHOT] TRIGGERED reason={reason} header={header}")
+    log("WARNING", f"[SNAPSHOT] TRIGGERED reason={reason} header={header}")
     rows = [_health_row(k, v, now) for k, v in payloads]
     _save_health_logs_df(engine, rows)
 
@@ -974,11 +974,11 @@ def main():
     setup_logger()
     log("INFO", "=" * 90)
     log("INFO", "BOOT backend9 planned/nonop daemon starting (TRIGGER SNAPSHOT + snapshot_rows + FIX)")
-    log("INFO", Demon_f"CFG sleep={SLEEP_SEC}s fetch_limit={FETCH_LIMIT} work_mem={PG_WORK_MEM}")
-    log("INFO", Demon_f"CFG stmt_timeout={PG_STATEMENT_TIMEOUT_MS} lock_timeout={PG_LOCK_TIMEOUT_MS} idle_tx_timeout={PG_IDLE_IN_TX_TIMEOUT_MS}")
-    log("INFO", Demon_f"CFG log_file={LOG_FILE}")
-    log("INFO", Demon_f"CFG snapshot cooldown={SNAP_COOLDOWN_SEC}s fct4_min={SNAP_FCT4_MIN_SEC}s fct123_max={SNAP_FCT123_MAX_SEC}s drop_ratio={SNAP_DROP_RATIO}")
-    log("INFO", Demon_f"CFG snapshot_rows edge=±{SNAP_EDGE_SEC}s rows_per_edge={SNAP_ROWS_PER_EDGE}")
+    log("INFO", f"CFG sleep={SLEEP_SEC}s fetch_limit={FETCH_LIMIT} work_mem={PG_WORK_MEM}")
+    log("INFO", f"CFG stmt_timeout={PG_STATEMENT_TIMEOUT_MS} lock_timeout={PG_LOCK_TIMEOUT_MS} idle_tx_timeout={PG_IDLE_IN_TX_TIMEOUT_MS}")
+    log("INFO", f"CFG log_file={LOG_FILE}")
+    log("INFO", f"CFG snapshot cooldown={SNAP_COOLDOWN_SEC}s fct4_min={SNAP_FCT4_MIN_SEC}s fct123_max={SNAP_FCT123_MAX_SEC}s drop_ratio={SNAP_DROP_RATIO}")
+    log("INFO", f"CFG snapshot_rows edge=±{SNAP_EDGE_SEC}s rows_per_edge={SNAP_ROWS_PER_EDGE}")
 
     engine = connect_with_retry()
 
@@ -986,7 +986,7 @@ def main():
         _ensure_health_table(engine)
         _save_health_logs_df(engine, [_health_row("boot", "backend9 started (trigger snapshot + snapshot_rows + fix)")])
     except Exception as e:
-        log("WARNING", Demon_f"[HEALTHLOG] init failed: {type(e).__name__}: {e}")
+        log("WARNING", f"[HEALTHLOG] init failed: {type(e).__name__}: {e}")
 
     ensure_schema(engine, SAVE_SCHEMA)
 
@@ -1022,7 +1022,7 @@ def main():
                 tables_ready = False
                 prev_total_vision = None
 
-                m = Demon_f"[WINDOW] changed => prod_day={ws.prod_day} shift={ws.shift_type} start={ws.start_ts.isoformat()} end(now)={ws.end_ts.isoformat()}"
+                m = f"[WINDOW] changed => prod_day={ws.prod_day} shift={ws.shift_type} start={ws.start_ts.isoformat()} end(now)={ws.end_ts.isoformat()}"
                 log("INFO", m)
                 health_buffer.append(_health_row("window", m, now))
 
@@ -1044,7 +1044,7 @@ def main():
 
                 nonop_rows_df = all_df[["end_day", "station", "from_time", "to_time"]].copy()
 
-                m = Demon_f"[BOOTSTRAP] rows={len(nonop_rows_df)} last_pk={last_pk}"
+                m = f"[BOOTSTRAP] rows={len(nonop_rows_df)} last_pk={last_pk}"
                 log("INFO", m)
                 health_buffer.append(_health_row("bootstrap", m, now))
 
@@ -1074,7 +1074,7 @@ def main():
                 if new_rows:
                     nonop_rows_df = pd.concat([nonop_rows_df, pd.DataFrame(new_rows)], ignore_index=True)
 
-            log("INFO", Demon_f"[FETCH] raw={raw_cnt} new={len(new_rows)} cached={len(nonop_rows_df)} last_pk={last_pk}")
+            log("INFO", f"[FETCH] raw={raw_cnt} new={len(new_rows)} cached={len(nonop_rows_df)} last_pk={last_pk}")
 
             df_planned = planned_rows_per_interval(
                 planned_df, cur_window.prod_day, cur_window.shift_type, now, include_total_row=True
@@ -1101,9 +1101,9 @@ def main():
                     )
                     last_snapshot_ts = time.time()
                 except Exception as e:
-                    log("ERROR", Demon_f"[SNAPSHOT] failed: {type(e).__name__}: {e}")
+                    log("ERROR", f"[SNAPSHOT] failed: {type(e).__name__}: {e}")
                     try:
-                        _save_health_logs_df(engine, [_health_row("snapshot_error", Demon_f"{type(e).__name__}: {e}", now)])
+                        _save_health_logs_df(engine, [_health_row("snapshot_error", f"{type(e).__name__}: {e}", now)])
                     except Exception:
                         pass
 
@@ -1140,18 +1140,18 @@ def main():
             last_upsert_at = last_success_at
 
             elapsed = (datetime.now(KST) - loop_started).total_seconds()
-            log("INFO", Demon_f"[LOOP] #{loop_no} done in {elapsed:.2f}s")
-            health_buffer.append(_health_row("loop", Demon_f"loop={loop_no} ok {elapsed:.2f}s", now))
+            log("INFO", f"[LOOP] #{loop_no} done in {elapsed:.2f}s")
+            health_buffer.append(_health_row("loop", f"loop={loop_no} ok {elapsed:.2f}s", now))
 
             try:
                 _save_health_logs_df(engine, health_buffer)
             except Exception as e:
-                log("WARNING", Demon_f"[HEALTHLOG] save failed: {type(e).__name__}: {e}")
+                log("WARNING", f"[HEALTHLOG] save failed: {type(e).__name__}: {e}")
 
         except (OperationalError, DBAPIError, SQLAlchemyError) as e:
             log_exception("DB error (will reconnect)", e)
             try:
-                _save_health_logs_df(engine, [_health_row("error", Demon_f"db error reconnect: {type(e).__name__}: {e}")])
+                _save_health_logs_df(engine, [_health_row("error", f"db error reconnect: {type(e).__name__}: {e}")])
             except Exception:
                 pass
 
@@ -1167,7 +1167,7 @@ def main():
                     _save_health_logs_df(engine, [_health_row("down", "db reconnected")])
                     break
                 except Exception as re:
-                    log("RETRY", Demon_f"Reconnect failed: {type(re).__name__}: {re} (sleep {SLEEP_SEC}s)")
+                    log("RETRY", f"Reconnect failed: {type(re).__name__}: {re} (sleep {SLEEP_SEC}s)")
                     time.sleep(SLEEP_SEC)
 
             tables_ready = False
@@ -1175,7 +1175,7 @@ def main():
         except Exception as e:
             log_exception("Unhandled error", e)
             try:
-                _save_health_logs_df(engine, [_health_row("error", Demon_f"unhandled: {type(e).__name__}: {e}")])
+                _save_health_logs_df(engine, [_health_row("error", f"unhandled: {type(e).__name__}: {e}")])
             except Exception:
                 pass
 
@@ -1183,17 +1183,17 @@ def main():
         if now_ts - last_heartbeat >= HEARTBEAT_SEC:
             hb_now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
             hb_msg = (
-                Demon_f"[HEARTBEAT] now={hb_now} loop={loop_no} "
-                Demon_f"window={cur_window.prod_day if cur_window else '-'}:{cur_window.shift_type if cur_window else '-'} "
-                Demon_f"last_pk={last_pk} cached_rows={len(nonop_rows_df) if nonop_rows_df is not None else 0} "
-                Demon_f"last_success={last_success_at.strftime('%H:%M:%S') if last_success_at else '-'} "
-                Demon_f"last_upsert={last_upsert_at.strftime('%H:%M:%S') if last_upsert_at else '-'}"
+                f"[HEARTBEAT] now={hb_now} loop={loop_no} "
+                f"window={cur_window.prod_day if cur_window else '-'}:{cur_window.shift_type if cur_window else '-'} "
+                f"last_pk={last_pk} cached_rows={len(nonop_rows_df) if nonop_rows_df is not None else 0} "
+                f"last_success={last_success_at.strftime('%H:%M:%S') if last_success_at else '-'} "
+                f"last_upsert={last_upsert_at.strftime('%H:%M:%S') if last_upsert_at else '-'}"
             )
             log("INFO", hb_msg)
             try:
                 _save_health_logs_df(engine, [_health_row("heartbeat", hb_msg)])
             except Exception as e:
-                log("WARNING", Demon_f"[HEALTHLOG] heartbeat save failed: {type(e).__name__}: {e}")
+                log("WARNING", f"[HEALTHLOG] heartbeat save failed: {type(e).__name__}: {e}")
             last_heartbeat = now_ts
 
         time.sleep(SLEEP_SEC)

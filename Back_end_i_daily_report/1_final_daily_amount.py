@@ -141,8 +141,8 @@ def qident(name: str) -> str:
 # =========================
 def make_engine() -> Engine:
     url = (
-        Demon_f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
-        Demon_f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+        f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
+        f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
     )
     return create_engine(
         url,
@@ -166,8 +166,8 @@ def with_work_mem(conn):
 def ensure_log_table(engine: Engine):
     with engine.begin() as conn:
         with_work_mem(conn)
-        conn.execute(text(Demon_f"CREATE SCHEMA IF NOT EXISTS {qident(LOG_SCHEMA)};"))
-        conn.execute(text(Demon_f"""
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {qident(LOG_SCHEMA)};"))
+        conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS {qident(LOG_SCHEMA)}.{qident(LOG_TABLE)} (
                 end_day  text,
                 end_time text,
@@ -197,7 +197,7 @@ def flush_pending_logs(engine: Optional[Engine]):
         if df.empty:
             return
 
-        sql = text(Demon_f"""
+        sql = text(f"""
             INSERT INTO {qident(LOG_SCHEMA)}.{qident(LOG_TABLE)}
             (end_day, end_time, info, contents)
             VALUES (:end_day, :end_time, :info, :contents)
@@ -218,7 +218,7 @@ def log(level: str, msg: str, engine: Optional[Engine] = None):
     info: error/down/sleep/... 처럼 소문자 저장
     """
     now = datetime.now(KST)
-    print(Demon_f"{now.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {msg}", flush=True)
+    print(f"{now.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {msg}", flush=True)
 
     # level을 info 컬럼으로 사용 (소문자 강제)
     PENDING_LOG_ROWS.append(_mk_log_row(level, msg, now=now))
@@ -277,7 +277,7 @@ def reset_tag(window: ShiftWindow, now: datetime) -> Optional[str]:
     for tt in targets:
         target_dt = datetime(now.year, now.month, now.day, tt.hour, tt.minute, tt.second, tzinfo=KST)
         if abs((now - target_dt).total_seconds()) <= RESET_TOL_SEC:
-            return Demon_f"{window.prod_day}_{window.shift_type}_{tt.strftime('%H%M%S')}"
+            return f"{window.prod_day}_{window.shift_type}_{tt.strftime('%H%M%S')}"
     return None
 
 # =========================
@@ -293,7 +293,7 @@ def normalize_passfail_series(s: pd.Series) -> pd.Series:
     return out
 
 def passfail_cell(pass_cnt: int, fail_cnt: int) -> str:
-    return Demon_f"PASS: {int(pass_cnt)}, FAIL: {int(fail_cnt)}"
+    return f"PASS: {int(pass_cnt)}, FAIL: {int(fail_cnt)}"
 
 # =========================
 # time_band 부여
@@ -311,7 +311,7 @@ def assign_band(end_ts: pd.Series, window: ShiftWindow) -> pd.Series:
 # remark_info 로드 (키->(pn,remark))
 # =========================
 def load_remark_map(engine: Engine) -> Dict[str, Tuple[str, str]]:
-    q = text(Demon_f"""
+    q = text(f"""
         SELECT barcode_information, pn, remark
         FROM {REMARK_SCHEMA}.{REMARK_TABLE}
     """)
@@ -359,7 +359,7 @@ def detect_result_col(engine: Engine) -> str:
         if cand.lower() in lower:
             return lower[cand.lower()]
 
-    raise RuntimeError(Demon_f"PASS/FAIL 컬럼을 찾지 못함. candidates={RESULT_CANDIDATES}, table_cols={cols}")
+    raise RuntimeError(f"PASS/FAIL 컬럼을 찾지 못함. candidates={RESULT_CANDIDATES}, table_cols={cols}")
 
 # =========================
 # DB fetch (full / incremental)
@@ -379,7 +379,7 @@ def fetch_rows(
     end_days = sorted({window.start_dt.strftime("%Y%m%d"), window.end_dt.strftime("%Y%m%d")})
     rc = qident(result_col)
 
-    sql = Demon_f"""
+    sql = f"""
     WITH base AS (
         SELECT
             station,
@@ -648,16 +648,16 @@ def build_station_df_from_latest(
 def ensure_schema(engine: Engine, schema: str):
     with engine.begin() as conn:
         with_work_mem(conn)
-        conn.execute(text(Demon_f"CREATE SCHEMA IF NOT EXISTS {schema};"))
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema};"))
 
 def ensure_table(engine: Engine, schema: str, table: str, columns: List[str], key_cols: List[str]):
     ddl_cols = []
     for c in columns:
-        ddl_cols.append(Demon_f'{qident(c)} {"timestamptz" if c=="updated_at" else "text"}')
+        ddl_cols.append(f'{qident(c)} {"timestamptz" if c=="updated_at" else "text"}')
     ddl_cols_sql = ",\n  ".join(ddl_cols)
     key_sql = ", ".join([qident(c) for c in key_cols])
 
-    create_sql = Demon_f"""
+    create_sql = f"""
     CREATE TABLE IF NOT EXISTS {schema}.{table} (
       {ddl_cols_sql},
       UNIQUE ({key_sql})
@@ -688,15 +688,15 @@ def upsert_df(engine: Engine, schema: str, table: str, df: pd.DataFrame, key_col
     cols = df.columns.tolist()
     col_sql = ", ".join([qident(c) for c in cols])
 
-    bind_names = [Demon_f"p{i}" for i in range(len(cols))]
-    val_sql = ", ".join([Demon_f":{bn}" for bn in bind_names])
+    bind_names = [f"p{i}" for i in range(len(cols))]
+    val_sql = ", ".join([f":{bn}" for bn in bind_names])
 
     key_sql = ", ".join([qident(c) for c in key_cols])
 
     non_keys = [c for c in cols if c not in key_cols]
-    set_sql = ", ".join([Demon_f'{qident(c)} = EXCLUDED.{qident(c)}' for c in non_keys])
+    set_sql = ", ".join([f'{qident(c)} = EXCLUDED.{qident(c)}' for c in non_keys])
 
-    sql = Demon_f"""
+    sql = f"""
     INSERT INTO {schema}.{table} ({col_sql})
     VALUES ({val_sql})
     ON CONFLICT ({key_sql})
@@ -714,7 +714,7 @@ def upsert_df(engine: Engine, schema: str, table: str, df: pd.DataFrame, key_col
     return len(records)
 
 def delete_shift_rows(engine: Engine, schema: str, table: str, prod_day: str, shift_type: str):
-    sql = text(Demon_f"""
+    sql = text(f"""
         DELETE FROM {schema}.{table}
         WHERE prod_day = :pd AND shift_type = :sh
     """)
@@ -729,10 +729,10 @@ def insert_df(engine: Engine, schema: str, table: str, df: pd.DataFrame) -> int:
     cols = df.columns.tolist()
     col_sql = ", ".join([qident(c) for c in cols])
 
-    bind_names = [Demon_f"p{i}" for i in range(len(cols))]
-    val_sql = ", ".join([Demon_f":{bn}" for bn in bind_names])
+    bind_names = [f"p{i}" for i in range(len(cols))]
+    val_sql = ", ".join([f":{bn}" for bn in bind_names])
 
-    sql = Demon_f"""
+    sql = f"""
     INSERT INTO {schema}.{table} ({col_sql})
     VALUES ({val_sql})
     """
@@ -752,7 +752,7 @@ def insert_df(engine: Engine, schema: str, table: str, df: pd.DataFrame) -> int:
 def main():
     # 부팅 로그(아직 DB 엔진 없으므로 버퍼만 적재)
     log("boot", "backend1 daily final amount daemon starting")
-    log("info", Demon_f"stations={STATIONS} (FCT+Vision), dedup scope = FCT-group / Vision-group separated")
+    log("info", f"stations={STATIONS} (FCT+Vision), dedup scope = FCT-group / Vision-group separated")
 
     engine: Optional[Engine] = None
 
@@ -773,11 +773,11 @@ def main():
             ensure_db_ready(engine)
             ensure_log_table(engine)
             flush_pending_logs(engine)
-            log("info", Demon_f"db connected (work_mem={WORK_MEM}, pool_size=1)", engine)
+            log("info", f"db connected (work_mem={WORK_MEM}, pool_size=1)", engine)
             break
         except Exception as e:
-            log("retry", Demon_f"db connect failed: {type(e).__name__}: {e}", engine=None)
-            log("sleep", Demon_f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect", engine=None)
+            log("retry", f"db connect failed: {type(e).__name__}: {e}", engine=None)
+            log("sleep", f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect", engine=None)
             time_mod.sleep(DB_RETRY_INTERVAL_SEC)
 
     while True:
@@ -790,11 +790,11 @@ def main():
             ensure_schema(engine, SAVE_SCHEMA)
             ensure_log_table(engine)
             flush_pending_logs(engine)
-            log("info", Demon_f"bootstrap ok (result_col={result_col})", engine)
+            log("info", f"bootstrap ok (result_col={result_col})", engine)
             break
         except Exception as e:
-            log("retry", Demon_f"bootstrap failed: {type(e).__name__}: {e}", engine)
-            log("sleep", Demon_f"sleep {DB_RETRY_INTERVAL_SEC}s before bootstrap retry", engine)
+            log("retry", f"bootstrap failed: {type(e).__name__}: {e}", engine)
+            log("sleep", f"sleep {DB_RETRY_INTERVAL_SEC}s before bootstrap retry", engine)
             time_mod.sleep(DB_RETRY_INTERVAL_SEC)
 
     while True:
@@ -816,12 +816,12 @@ def main():
             if current_ctx is None or ctx != current_ctx:
                 need_full_rebuild = True
                 last_reset_fired = None
-                log("info", Demon_f"[window] prod_day={window.prod_day} shift={window.shift_type} {window.start_dt} -> {window.end_dt} (ctx change)", engine)
+                log("info", f"[window] prod_day={window.prod_day} shift={window.shift_type} {window.start_dt} -> {window.end_dt} (ctx change)", engine)
 
             if tag is not None and tag != last_reset_fired:
                 need_full_rebuild = True
                 last_reset_fired = tag
-                log("info", Demon_f"[reset] trigger={tag} (full rebuild & delete+insert)", engine)
+                log("info", f"[reset] trigger={tag} (full rebuild & delete+insert)", engine)
 
             if last_remark_refresh is None or (now - last_remark_refresh).total_seconds() >= 600:
                 remark_map = load_remark_map(engine)
@@ -846,15 +846,15 @@ def main():
                 log("info", "[last_pk] (reset) last_pk=None -> full fetch", engine)
 
                 df_all = fetch_rows(engine, window, result_col, last_pk=None)
-                log("info", Demon_f"[fetch] full rows={len(df_all)}", engine)
+                log("info", f"[fetch] full rows={len(df_all)}", engine)
 
                 upd_fct, upd_vis = update_latest_maps(latest_fct, latest_vis, df_all)
                 last_pk = compute_last_pk_from_df(df_all)
 
                 log(
                     "info",
-                    Demon_f"[build] latest_fct={len(latest_fct)}(upd={upd_fct}) latest_vis={len(latest_vis)}(upd={upd_vis}) "
-                    Demon_f"last_pk={None if last_pk is None else (last_pk.end_day, last_pk.end_time, last_pk.barcode)}",
+                    f"[build] latest_fct={len(latest_fct)}(upd={upd_fct}) latest_vis={len(latest_vis)}(upd={upd_vis}) "
+                    f"last_pk={None if last_pk is None else (last_pk.end_day, last_pk.end_time, last_pk.barcode)}",
                     engine
                 )
 
@@ -866,21 +866,21 @@ def main():
                 ensure_table(engine, SAVE_SCHEMA, t_overall, overall_df.columns.tolist(), KEY_OVERALL)
                 ensure_table(engine, SAVE_SCHEMA, t_station, station_df.columns.tolist(), KEY_STATION)
 
-                log("info", Demon_f"[insert] delete+insert into {SAVE_SCHEMA}.{t_overall} / {SAVE_SCHEMA}.{t_station}", engine)
+                log("info", f"[insert] delete+insert into {SAVE_SCHEMA}.{t_overall} / {SAVE_SCHEMA}.{t_station}", engine)
                 delete_shift_rows(engine, SAVE_SCHEMA, t_overall, window.prod_day, window.shift_type)
                 delete_shift_rows(engine, SAVE_SCHEMA, t_station, window.prod_day, window.shift_type)
 
                 ins1 = insert_df(engine, SAVE_SCHEMA, t_overall, overall_df)
                 ins2 = insert_df(engine, SAVE_SCHEMA, t_station, station_df)
 
-                log("info", Demon_f"[insert] inserted overall(vision)={ins1}, station(fct+vision)={ins2}", engine)
+                log("info", f"[insert] inserted overall(vision)={ins1}, station(fct+vision)={ins2}", engine)
                 current_ctx = ctx
 
             else:
-                log("info", Demon_f"[last_pk] last_pk={None if last_pk is None else (last_pk.end_day, last_pk.end_time, last_pk.barcode)}", engine)
+                log("info", f"[last_pk] last_pk={None if last_pk is None else (last_pk.end_day, last_pk.end_time, last_pk.barcode)}", engine)
 
                 df_new = fetch_rows(engine, window, result_col, last_pk=last_pk)
-                log("info", Demon_f"[fetch] new rows={len(df_new)}", engine)
+                log("info", f"[fetch] new rows={len(df_new)}", engine)
 
                 if not df_new.empty:
                     upd_fct, upd_vis = update_latest_maps(latest_fct, latest_vis, df_new)
@@ -891,8 +891,8 @@ def main():
 
                     log(
                         "info",
-                        Demon_f"[build] latest_fct={len(latest_fct)}(upd={upd_fct}) latest_vis={len(latest_vis)}(upd={upd_vis}) "
-                        Demon_f"last_pk={(last_pk.end_day, last_pk.end_time, last_pk.barcode) if last_pk else None}",
+                        f"[build] latest_fct={len(latest_fct)}(upd={upd_fct}) latest_vis={len(latest_vis)}(upd={upd_vis}) "
+                        f"last_pk={(last_pk.end_day, last_pk.end_time, last_pk.barcode) if last_pk else None}",
                         engine
                     )
 
@@ -904,39 +904,39 @@ def main():
                     ensure_table(engine, SAVE_SCHEMA, t_overall, overall_df.columns.tolist(), KEY_OVERALL)
                     ensure_table(engine, SAVE_SCHEMA, t_station, station_df.columns.tolist(), KEY_STATION)
 
-                    log("info", Demon_f"[upsert] saving to {SAVE_SCHEMA}.{t_overall} / {SAVE_SCHEMA}.{t_station}", engine)
+                    log("info", f"[upsert] saving to {SAVE_SCHEMA}.{t_overall} / {SAVE_SCHEMA}.{t_station}", engine)
                     up1 = upsert_df(engine, SAVE_SCHEMA, t_overall, overall_df, KEY_OVERALL)
                     up2 = upsert_df(engine, SAVE_SCHEMA, t_station, station_df, KEY_STATION)
-                    log("info", Demon_f"[upsert] upserted overall(vision)={up1}, station(fct+vision)={up2}", engine)
+                    log("info", f"[upsert] upserted overall(vision)={up1}, station(fct+vision)={up2}", engine)
 
                 current_ctx = ctx
 
         except (OperationalError, DBAPIError) as e:
-            log("down", Demon_f"db error: {type(e).__name__}: {e}", engine=None)
+            log("down", f"db error: {type(e).__name__}: {e}", engine=None)
             while True:
                 try:
                     engine = make_engine()
                     ensure_db_ready(engine)
                     ensure_log_table(engine)
                     flush_pending_logs(engine)
-                    log("info", Demon_f"db reconnected (work_mem={WORK_MEM})", engine)
+                    log("info", f"db reconnected (work_mem={WORK_MEM})", engine)
 
                     result_col = detect_result_col(engine)
                     remark_map = load_remark_map(engine)
                     last_remark_refresh = datetime.now(KST)
-                    log("info", Demon_f"re-bootstrap ok (result_col={result_col})", engine)
+                    log("info", f"re-bootstrap ok (result_col={result_col})", engine)
                     break
                 except Exception as e2:
-                    log("retry", Demon_f"db reconnect failed: {type(e2).__name__}: {e2}", engine=None)
-                    log("sleep", Demon_f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect retry", engine=None)
+                    log("retry", f"db reconnect failed: {type(e2).__name__}: {e2}", engine=None)
+                    log("sleep", f"sleep {DB_RETRY_INTERVAL_SEC}s before reconnect retry", engine=None)
                     time_mod.sleep(DB_RETRY_INTERVAL_SEC)
 
         except Exception as e:
-            log("error", Demon_f"unhandled error: {type(e).__name__}: {e}", engine)
+            log("error", f"unhandled error: {type(e).__name__}: {e}", engine)
 
         elapsed = time_mod.time() - loop_t0
         sleep_sec = max(0.0, LOOP_INTERVAL_SEC - elapsed)
-        log("sleep", Demon_f"loop sleep {sleep_sec:.3f}s", engine)
+        log("sleep", f"loop sleep {sleep_sec:.3f}s", engine)
         time_mod.sleep(sleep_sec)
 
 if __name__ == "__main__":
