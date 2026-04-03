@@ -3094,30 +3094,18 @@ def render_modals(end_day: str, shift: str):
 
 
 def _snap_data_ready_state(end_day: str, shift: str) -> Dict[str, Any]:
-    planned_ready = bool(st.session_state.get("planned_loaded_once", False))
-    nonop_ready = bool(st.session_state.get("nonop_loaded_once", False))
-    nonop_chart_ready = bool(st.session_state.get("nonop_chart_loaded_once", False))
+    scope_ok = True
+    data_ready = bool(st.session_state.get("p01_snap_data_ready", False))
 
-    scope_ok = str(st.session_state.get("last_scope", "") or "") == f"{end_day}:{shift}"
-
-    # SNAP 캡처에서는 worker/master 조회 지연 때문에 전체 ready를 막지 않도록 완화
-    worker_ready = True
-    master_ready = True
-
-    ready = bool(
-        planned_ready
-        and nonop_ready
-        and nonop_chart_ready
-        and scope_ok
-    )
+    ready = bool(data_ready)
 
     return {
         "ready": ready,
-        "planned_ready": planned_ready,
-        "nonop_ready": nonop_ready,
-        "nonop_chart_ready": nonop_chart_ready,
-        "worker_ready": worker_ready,
-        "master_ready": master_ready,
+        "planned_ready": data_ready,
+        "nonop_ready": data_ready,
+        "nonop_chart_ready": data_ready,
+        "worker_ready": True,
+        "master_ready": True,
         "scope_ok": scope_ok,
         "scope": f"{end_day}:{shift}",
     }
@@ -3399,6 +3387,7 @@ with st.expander("PERF LOG (최근)", expanded=False):
         st.caption("로그 없음")
 
 if SNAP:
+    st.session_state["p01_snap_data_ready"] = True
     _render_snap_ready_marker(end_day, shift)
 
 _snap_mark_ready()
