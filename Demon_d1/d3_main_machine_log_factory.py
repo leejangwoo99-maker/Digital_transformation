@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import threading
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,6 +64,11 @@ IDLE_LOG_SEC = int(os.getenv("D3_IDLE_LOG_SEC", "60"))
 
 HEALTH_FLUSH_SEC = int(os.getenv("D3_HEALTH_FLUSH_SEC", "5"))
 HEALTH_BUFFER_MAX = int(os.getenv("D3_HEALTH_BUFFER_MAX", "500"))
+HEALTH_WORKER_STALE_SEC = int(os.getenv("D3_HEALTH_WORKER_STALE_SEC", "60"))
+LOCAL_LOG_PATH = Path(os.getenv(
+    "D3_LOCAL_LOG_PATH",
+    str(Path(__file__).with_suffix(".runtime.log")),
+))
 
 LINE_PATTERN = re.compile(r"^\[(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\]\s*(.*)$")
 
@@ -91,7 +97,13 @@ def _health_row(info: str, contents: str) -> Dict[str, str]:
 
 
 def _log_console(level: str, msg: str) -> None:
-    print(f"[{_ts()}] [{level}] {msg}", flush=True)
+    line = f"[{_ts()}] [{level}] {msg}"
+    print(line, flush=True)
+    try:
+        with LOCAL_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def logx(level: str, msg: str) -> None:
@@ -135,6 +147,71 @@ def err_exc(prefix: str, e: Exception) -> None:
 # SQLAlchemy Engine (DDL/health flush용)
 # =========================
 _ENGINE: Optional[Engine] = None
+_HEALTH_ENGINE: Optional[Engine] = None
+_health_flush_running: bool = False
+_health_flush_started_ts: float = 0.0
+_health_flush_thread: Optional[threading.Thread] = None
+_health_flush_generation: int = 0
+_health_flush_lock = threading.Lock()
+
+
+def _build_engine(application_name: str) -> Engine:
+    user = DB_CONFIG["user"]
+    pw = DB_CONFIG["password"]
+    host = DB_CONFIG["host"]
+    port = DB_CONFIG["port"]
+    db = DB_CONFIG["dbname"]
+    conn_str = (
+        f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}"
+        f"?connect_timeout={CONNECT_TIMEOUT_SEC}"
+        f"&application_name={application_name}"
+    )
+    return create_engine(
+        conn_str,
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=30,
+        pool_recycle=300,
+        future=True,
+    )
+
+
+def _dispose_engine() -> None:
+    global _ENGINE
+    try:
+        if _ENGINE is not None:
+            _ENGINE.dispose()
+    except Exception:
+        pass
+    _ENGINE = None
+
+
+def _dispose_health_engine() -> None:
+    global _HEALTH_ENGINE
+    try:
+        if _HEALTH_ENGINE is not None:
+            _HEALTH_ENGINE.dispose()
+    except Exception:
+        pass
+    _HEALTH_ENGINE = None
+
+
+def get_health_engine() -> Engine:
+    global _HEALTH_ENGINE
+    if _HEALTH_ENGINE is None:
+        _HEALTH_ENGINE = _build_engine("d3_main_machine_log_factory_health")
+    return _HEALTH_ENGINE
+
+
+def is_health_flush_stale(now_ts: Optional[float] = None) -> bool:
+    if now_ts is None:
+        now_ts = time.time()
+    return (
+        _health_flush_running
+        and _health_flush_started_ts > 0
+        and (now_ts - _health_flush_started_ts) >= HEALTH_WORKER_STALE_SEC
+    )
 
 
 def get_engine_blocking() -> Engine:
@@ -142,24 +219,7 @@ def get_engine_blocking() -> Engine:
     while True:
         try:
             if _ENGINE is None:
-                user = DB_CONFIG["user"]
-                pw = DB_CONFIG["password"]
-                host = DB_CONFIG["host"]
-                port = DB_CONFIG["port"]
-                db = DB_CONFIG["dbname"]
-                conn_str = (
-                    f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}"
-                    f"?connect_timeout={CONNECT_TIMEOUT_SEC}"
-                )
-                _ENGINE = create_engine(
-                    conn_str,
-                    pool_pre_ping=True,
-                    pool_size=2,
-                    max_overflow=0,
-                    pool_timeout=30,
-                    pool_recycle=300,
-                    future=True,
-                )
+                _ENGINE = _build_engine("d3_main_machine_log_factory")
 
             with _ENGINE.connect() as conn:
                 conn.execute(text("SET work_mem = :wm"), {"wm": str(PG_WORK_MEM)})
@@ -168,12 +228,7 @@ def get_engine_blocking() -> Engine:
 
         except Exception as e:
             _log_console("RETRY", f"DB connect failed: {type(e).__name__}: {str(e).strip()}")
-            try:
-                if _ENGINE is not None:
-                    _ENGINE.dispose()
-            except Exception:
-                pass
-            _ENGINE = None
+            _dispose_engine()
             time.sleep(DB_RETRY_INTERVAL_SEC)
 
 
@@ -230,7 +285,8 @@ def ensure_health_table(engine: Engine) -> None:
 
 
 def flush_health_logs(force: bool = False) -> None:
-    global _last_health_flush_ts, _health_buf
+    global _last_health_flush_ts, _health_buf, _health_flush_running
+    global _health_flush_started_ts, _health_flush_thread, _health_flush_generation
     if not _health_buf:
         return
 
@@ -238,26 +294,116 @@ def flush_health_logs(force: bool = False) -> None:
     if (not force) and (now_ts - _last_health_flush_ts) < HEALTH_FLUSH_SEC:
         return
 
-    rows = list(_health_buf)
-    if not rows:
-        _last_health_flush_ts = now_ts
-        return
+    with _health_flush_lock:
+        if _health_flush_running:
+            if is_health_flush_stale(now_ts):
+                _log_console(
+                    "WARN",
+                    f"[LOG-DB][WATCHDOG] health flush stale "
+                    f"age={now_ts - _health_flush_started_ts:.1f}s -> restart allowed",
+                )
+                _dispose_health_engine()
+                _health_flush_running = False
+                _health_flush_started_ts = 0.0
+                _health_flush_thread = None
+                _health_flush_generation += 1
+            else:
+                if len(_health_buf) > HEALTH_BUFFER_MAX:
+                    _health_buf = _health_buf[-HEALTH_BUFFER_MAX:]
+                _last_health_flush_ts = now_ts
+                _log_console("WARN", "[LOG-DB][SKIP] previous health flush is still running")
+                return
 
-    engine = get_engine_blocking()
-    sql = text(f"""
-        INSERT INTO {HEALTH_FQN} (end_day, end_time, info, contents)
-        VALUES (:end_day, :end_time, :info, :contents)
-    """)
+        if len(_health_buf) > HEALTH_BUFFER_MAX:
+            dropped = len(_health_buf) - HEALTH_BUFFER_MAX
+            _health_buf = _health_buf[-HEALTH_BUFFER_MAX:]
+            _log_console("WARN", f"[LOG-DB][DROP] health buffer overflow dropped={dropped}")
+
+        rows = list(_health_buf)
+        _health_buf = []
+        _health_flush_running = True
+        _health_flush_started_ts = now_ts
+        _health_flush_generation += 1
+        generation = _health_flush_generation
+        _last_health_flush_ts = now_ts
+
+    def _worker(rows_to_write: List[Dict[str, str]], my_generation: int) -> None:
+        global _health_buf, _health_flush_running, _health_flush_started_ts, _health_flush_thread
+        sql = text(f"""
+            INSERT INTO {HEALTH_FQN} (end_day, end_time, info, contents)
+            VALUES (:end_day, :end_time, :info, :contents)
+        """)
+        try:
+            engine = get_health_engine()
+            with engine.begin() as conn:
+                conn.execute(text("SET work_mem = :wm"), {"wm": str(PG_WORK_MEM)})
+                conn.execute(sql, rows_to_write)
+        except Exception as e:
+            _dispose_health_engine()
+            _log_console("WARN", f"[LOG-DB][SKIP] {type(e).__name__}: {str(e).strip()}")
+            with _health_flush_lock:
+                _health_buf = rows_to_write + _health_buf
+                if len(_health_buf) > HEALTH_BUFFER_MAX:
+                    _health_buf = _health_buf[-HEALTH_BUFFER_MAX:]
+        finally:
+            with _health_flush_lock:
+                if my_generation == _health_flush_generation:
+                    _health_flush_running = False
+                    _health_flush_started_ts = 0.0
+                    _health_flush_thread = None
 
     try:
-        with engine.begin() as conn:
-            conn.execute(text("SET work_mem = :wm"), {"wm": str(PG_WORK_MEM)})
-            conn.execute(sql, rows)
-        _health_buf = []
-        _last_health_flush_ts = now_ts
+        thread = threading.Thread(target=_worker, args=(rows, generation), daemon=True)
+        with _health_flush_lock:
+            _health_flush_thread = thread
+        thread.start()
     except Exception as e:
-        _log_console("WARN", f"[LOG-DB][SKIP] {type(e).__name__}: {str(e).strip()}")
-        _last_health_flush_ts = now_ts
+        with _health_flush_lock:
+            _health_buf = rows + _health_buf
+            _health_flush_running = False
+            _health_flush_started_ts = 0.0
+            _health_flush_thread = None
+            _health_flush_generation += 1
+        _log_console("WARN", f"[LOG-DB][SKIP] failed to start async flush | {type(e).__name__}: {e}")
+
+
+def check_health_worker() -> None:
+    global _health_flush_running, _health_flush_started_ts, _health_flush_thread, _health_flush_generation
+    now_ts = time.time()
+    with _health_flush_lock:
+        if not is_health_flush_stale(now_ts):
+            return
+        _log_console(
+            "WARN",
+            f"[LOG-DB][WATCHDOG] health worker stale "
+            f"age={now_ts - _health_flush_started_ts:.1f}s -> marking dead",
+        )
+        _dispose_health_engine()
+        _health_flush_running = False
+        _health_flush_started_ts = 0.0
+        _health_flush_thread = None
+        _health_flush_generation += 1
+
+
+def get_psycopg2_conn_once():
+    try:
+        conn = psycopg2.connect(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            dbname=DB_CONFIG["dbname"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            connect_timeout=CONNECT_TIMEOUT_SEC,
+        )
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("SET work_mem = %s", (str(PG_WORK_MEM),))
+            cur.execute("SET client_encoding = 'UTF8'")
+        return conn
+    except Exception as e:
+        retry(f"psycopg2 connect failed: {type(e).__name__}: {str(e).strip()}")
+        flush_health_logs(force=False)
+        return None
 
 
 # =========================
@@ -265,30 +411,24 @@ def flush_health_logs(force: bool = False) -> None:
 # =========================
 def get_psycopg2_conn_blocking():
     while True:
-        try:
-            conn = psycopg2.connect(
-                host=DB_CONFIG["host"],
-                port=DB_CONFIG["port"],
-                dbname=DB_CONFIG["dbname"],
-                user=DB_CONFIG["user"],
-                password=DB_CONFIG["password"],
-                connect_timeout=CONNECT_TIMEOUT_SEC,
-            )
-            conn.autocommit = False
-            with conn.cursor() as cur:
-                cur.execute("SET work_mem = %s", (str(PG_WORK_MEM),))
-                cur.execute("SET client_encoding = 'UTF8'")
+        conn = get_psycopg2_conn_once()
+        if conn is not None:
             return conn
-        except Exception as e:
-            retry(f"psycopg2 connect failed: {type(e).__name__}: {str(e).strip()}")
-            flush_health_logs(force=False)
-            time.sleep(DB_RETRY_INTERVAL_SEC)
+        time.sleep(DB_RETRY_INTERVAL_SEC)
+
+
+def close_conn_quietly(conn) -> None:
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
 
 
 def preload_existing_keys(conn, day_ymd: str) -> Set[DedupKey]:
     """
-    DB에 이미 존재하는 당일 dedup key preload
-    dedup 기준: (end_day, station, end_time, contents)
+    DB????? 鈺곕똻???롫뮉 ?諭??dedup key preload
+    dedup 疫꿸퀣?: (end_day, station, end_time, contents)
     """
     sql = f"""
         SELECT end_day, station, end_time, contents
@@ -297,36 +437,28 @@ def preload_existing_keys(conn, day_ymd: str) -> Set[DedupKey]:
           AND station=%s
     """
     out: Set[DedupKey] = set()
-    while True:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (day_ymd, STATION))
+            rows = cur.fetchall()
+
+        for end_day, station, end_time, contents in rows:
+            key: DedupKey = (
+                "" if end_day is None else str(end_day),
+                "" if station is None else str(station),
+                "" if end_time is None else str(end_time),
+                "" if contents is None else str(contents),
+            )
+            out.add(key)
+
+        conn.commit()
+        return out
+    except Exception:
         try:
-            with conn.cursor() as cur:
-                cur.execute(sql, (day_ymd, STATION))
-                rows = cur.fetchall()
-
-            for end_day, station, end_time, contents in rows:
-                key: DedupKey = (
-                    "" if end_day is None else str(end_day),
-                    "" if station is None else str(station),
-                    "" if end_time is None else str(end_time),
-                    "" if contents is None else str(contents),
-                )
-                out.add(key)
-
-            conn.commit()
-            return out
-
-        except Exception as e:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            warn(f"preload failed -> reconnect | {type(e).__name__}: {str(e).strip()}")
-            try:
-                conn.close()
-            except Exception:
-                pass
-            conn = get_psycopg2_conn_blocking()
-            time.sleep(DB_RETRY_INTERVAL_SEC)
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 INSERT_SQL = f"""
@@ -339,8 +471,8 @@ ON CONFLICT DO NOTHING
 
 def insert_execute_values_with_progress(conn, rows: List[Row], page: int, phase: str) -> Tuple[int, int]:
     """
-    ON CONFLICT DO NOTHING 기준
-    반환:
+    ON CONFLICT DO NOTHING 疫꿸퀣?
+    獄쏆꼹??
       inserted_total, skipped_total
     """
     inserted_total = 0
@@ -435,7 +567,7 @@ def scan_file_rows_filtered(file_path: Path, day_ymd: str, existing_keys: Set[De
 
             key: DedupKey = (day_ymd, STATION, end_time_str, contents)
 
-            # 이미 DB에 있거나 이번 스캔 루프에서 이미 담았으면 skip
+            # ??? DB????뉕탢????苡???쇳떔 ?룐뫂遊?癒?퐣 ??? ??곷릭??겹늺 skip
             if key in existing_keys or key in local_seen:
                 continue
 
@@ -460,8 +592,10 @@ def main() -> None:
     info(f"HEALTH={HEALTH_FQN} cols=id,end_day,end_time,info,contents")
     info(
         f"WORK_MEM={PG_WORK_MEM} | SLEEP={SLEEP_SEC}s | "
-        f"PAGE_START={VALUES_PAGE_START} | IDLE_LOG={IDLE_LOG_SEC}s | HEALTH_FLUSH={HEALTH_FLUSH_SEC}s"
+        f"PAGE_START={VALUES_PAGE_START} | IDLE_LOG={IDLE_LOG_SEC}s | "
+        f"HEALTH_FLUSH={HEALTH_FLUSH_SEC}s | HEALTH_STALE={HEALTH_WORKER_STALE_SEC}s"
     )
+    info(f"LOCAL_LOG_PATH={LOCAL_LOG_PATH}")
 
     current_day: Optional[str] = None
     existing_keys: Set[DedupKey] = set()
@@ -472,6 +606,7 @@ def main() -> None:
         loop_t0 = time.perf_counter()
 
         try:
+            check_health_worker()
             w = window_now()
 
             if current_day != w.day_ymd:
@@ -493,14 +628,21 @@ def main() -> None:
                 continue
 
             if not bootstrapped:
-                conn = get_psycopg2_conn_blocking()
-                info("[BOOTSTRAP] preload existing dedup keys from DB...")
-                existing_keys = preload_existing_keys(conn, w.day_ymd)
-                info(f"[BOOTSTRAP] existing_keys={len(existing_keys)}")
+                conn = get_psycopg2_conn_once()
+                if conn is None:
+                    warn("[BOOTSTRAP] DB unavailable -> retry next loop")
+                    time.sleep(DB_RETRY_INTERVAL_SEC)
+                    continue
                 try:
-                    conn.close()
-                except Exception:
-                    pass
+                    info("[BOOTSTRAP] preload existing dedup keys from DB...")
+                    existing_keys = preload_existing_keys(conn, w.day_ymd)
+                    info(f"[BOOTSTRAP] existing_keys={len(existing_keys)}")
+                except Exception as e:
+                    warn(f"[BOOTSTRAP] preload failed -> retry next loop | {type(e).__name__}: {str(e).strip()}")
+                    time.sleep(DB_RETRY_INTERVAL_SEC)
+                    continue
+                finally:
+                    close_conn_quietly(conn)
                 bootstrapped = True
                 flush_health_logs(force=False)
 
@@ -511,7 +653,11 @@ def main() -> None:
                 flush_health_logs(force=False)
 
                 page = VALUES_PAGE_START
-                conn = get_psycopg2_conn_blocking()
+                conn = get_psycopg2_conn_once()
+                if conn is None:
+                    warn("[WRITE] DB unavailable -> retry next loop")
+                    time.sleep(DB_RETRY_INTERVAL_SEC)
+                    continue
 
                 while True:
                     try:
@@ -522,8 +668,8 @@ def main() -> None:
                             phase="INCR",
                         )
 
-                        # 이번 스캔 대상은 insert 성공/중복 skip 여부와 상관없이
-                        # 이제 DB에 있거나 같은 의미로 처리 완료된 것으로 간주
+                        # ??苡???쇳떔 ???怨? insert ?源껊궗/餓λ쵎??skip ????? ?怨???곸뵠
+                        # ??곸젫 DB????뉕탢??揶쏆늿? ???嚥?筌ｌ꼶???袁⑥┷??野껉퍔?앮에?揶쏄쑴竊?
                         for row in rows_new:
                             existing_keys.add(row)
 
@@ -549,18 +695,14 @@ def main() -> None:
 
                         page = max(VALUES_PAGE_MIN, page // 2)
 
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-
-                        conn = get_psycopg2_conn_blocking()
+                        close_conn_quietly(conn)
+                        conn = get_psycopg2_conn_once()
+                        if conn is None:
+                            warn("[WRITE] reconnect failed -> retry next loop")
+                            break
                         time.sleep(DB_RETRY_INTERVAL_SEC)
 
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                close_conn_quietly(conn)
 
             else:
                 now_ts = time.time()
@@ -579,6 +721,7 @@ def main() -> None:
             flush_health_logs(force=False)
             time.sleep(DB_RETRY_INTERVAL_SEC)
 
+        check_health_worker()
         flush_health_logs(force=False)
 
         elapsed = time.perf_counter() - loop_t0

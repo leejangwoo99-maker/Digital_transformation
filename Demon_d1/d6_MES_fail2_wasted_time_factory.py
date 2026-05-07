@@ -33,6 +33,8 @@ import os
 import time
 import urllib.parse
 from datetime import datetime, timedelta
+from pathlib import Path
+import threading
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Dict
 
@@ -76,6 +78,7 @@ GOODORBAD_VALUE = "BadFile"
 
 LOOP_SLEEP_SEC = 5
 DB_RETRY_INTERVAL_SEC = 5
+DB_CONNECT_MAX_WAIT_SEC = int(os.getenv("D6_DB_CONNECT_MAX_WAIT_SEC", "60"))
 
 # 세션 옵션(핵심: hang 방지)
 WORK_MEM = os.getenv("PG_WORK_MEM", "64MB")
@@ -96,14 +99,24 @@ WARM_START_LOOKBACK_MIN = int(os.getenv("WARM_START_LOOKBACK_MIN", "60"))
 # 헬스 로그: 버퍼 flush 주기
 HEALTH_FLUSH_INTERVAL_SEC = int(os.getenv("D6_HEALTH_FLUSH_SEC", "5"))
 HEALTH_BUFFER_MAX = int(os.getenv("D6_HEALTH_BUFFER_MAX", "500"))
+HEALTH_FLUSH_TIMEOUT_SEC = int(os.getenv("D6_HEALTH_FLUSH_TIMEOUT_SEC", "20"))
+LOCAL_LOG_PATH = Path(os.getenv(
+    "D6_LOCAL_LOG_PATH",
+    str(Path(__file__).with_suffix(".runtime.log")),
+))
 
 
 # =========================
 # 1) GLOBALS
 # =========================
 _ENGINE: Optional[Engine] = None
+_HEALTH_ENGINE: Optional[Engine] = None
 _health_buf: List[Dict[str, str]] = []
 _last_health_flush_ts: float = 0.0
+_health_flush_running: bool = False
+_health_flush_started_ts: float = 0.0
+_health_flush_generation: int = 0
+_health_flush_lock = threading.Lock()
 
 
 # =========================
@@ -120,7 +133,14 @@ def _masked_db() -> str:
 
 def log_console(msg: str) -> None:
     ts = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    try:
+        LOCAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOCAL_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def _health_row(info: str, contents: str) -> Dict[str, str]:
@@ -170,6 +190,10 @@ def _is_connection_error(e: Exception) -> bool:
     return any(k in msg for k in keys)
 
 
+class DbUnavailable(RuntimeError):
+    pass
+
+
 def _dispose_engine() -> None:
     global _ENGINE
     try:
@@ -180,7 +204,21 @@ def _dispose_engine() -> None:
     _ENGINE = None
 
 
+def _dispose_health_engine() -> None:
+    global _HEALTH_ENGINE
+    try:
+        if _HEALTH_ENGINE is not None:
+            _HEALTH_ENGINE.dispose()
+    except Exception:
+        pass
+    _HEALTH_ENGINE = None
+
+
 def _build_engine() -> Engine:
+    return _build_engine_for("d6_MES_fail2_wasted_time")
+
+
+def _build_engine_for(application_name: str) -> Engine:
     user = DB_CONFIG["user"]
     password = urllib.parse.quote_plus(DB_CONFIG["password"])
     host = DB_CONFIG["host"]
@@ -203,7 +241,7 @@ def _build_engine() -> Engine:
 
     connect_args = {
         "connect_timeout": 5,
-        "application_name": "d6_MES_fail2_wasted_time",
+        "application_name": application_name,
         "options": options,
     }
 
@@ -227,15 +265,38 @@ def _build_engine() -> Engine:
     )
 
 
-def get_engine_blocking() -> Engine:
+def get_health_engine() -> Engine:
+    global _HEALTH_ENGINE
+    if _HEALTH_ENGINE is None:
+        _HEALTH_ENGINE = _build_engine_for("d6_MES_fail2_wasted_time_health")
+    return _HEALTH_ENGINE
+
+
+def _connect_deadline(max_wait_sec: Optional[int] = None) -> Optional[float]:
+    wait_sec = DB_CONNECT_MAX_WAIT_SEC if max_wait_sec is None else max_wait_sec
+    if wait_sec <= 0:
+        return None
+    return time.monotonic() + wait_sec
+
+
+def _raise_if_connect_deadline_passed(deadline: Optional[float], stage: str, max_wait_sec: Optional[int]) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        _dispose_engine()
+        wait_sec = DB_CONNECT_MAX_WAIT_SEC if max_wait_sec is None else max_wait_sec
+        raise DbUnavailable(f"DB connect timed out while {stage} after {wait_sec}s")
+
+
+def get_engine_blocking(max_wait_sec: Optional[int] = None) -> Engine:
     """
-    ✅ DB 연결 성공까지 무한 재시도(블로킹)
+    ✅ DB 연결을 제한 시간 안에서 재시도
     ✅ 엔진 1개 고정, ping 실패하면 dispose 후 재생성
     """
     global _ENGINE
+    deadline = _connect_deadline(max_wait_sec)
 
     # 1) existing ping
     while _ENGINE is not None:
+        _raise_if_connect_deadline_passed(deadline, "pinging existing engine", max_wait_sec)
         try:
             with _ENGINE.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -247,6 +308,7 @@ def get_engine_blocking() -> Engine:
 
     # 2) create & connect
     while True:
+        _raise_if_connect_deadline_passed(deadline, "creating engine", max_wait_sec)
         try:
             _ENGINE = _build_engine()
             with _ENGINE.connect() as conn:
@@ -336,9 +398,7 @@ def ensure_demon_log_table(engine: Engine) -> None:
 # 5) HEALTH LOG FLUSH (buffered)
 # =========================
 def flush_health_logs(engine: Optional[Engine], force: bool = False) -> None:
-    global _last_health_flush_ts, _health_buf
-    if engine is None:
-        return
+    global _last_health_flush_ts, _health_buf, _health_flush_running, _health_flush_started_ts, _health_flush_generation
     if not _health_buf:
         return
 
@@ -346,29 +406,57 @@ def flush_health_logs(engine: Optional[Engine], force: bool = False) -> None:
     if (not force) and (now_ts - _last_health_flush_ts) < HEALTH_FLUSH_INTERVAL_SEC:
         return
 
-    df = pd.DataFrame(_health_buf, columns=["end_day", "end_time", "info", "contents"])
-    if df.empty:
-        _last_health_flush_ts = now_ts
+    with _health_flush_lock:
+        if _health_flush_running:
+            age = now_ts - _health_flush_started_ts
+            if age < HEALTH_FLUSH_TIMEOUT_SEC:
+                if len(_health_buf) > HEALTH_BUFFER_MAX:
+                    _health_buf = _health_buf[-HEALTH_BUFFER_MAX:]
+                _last_health_flush_ts = now_ts
+                log_console(f"[LOG-DB][SKIP] previous health flush is still running ({age:.1f}s)")
+                return
+
+            log_console(f"[LOG-DB][WATCHDOG] health flush stale for {age:.1f}s -> restart health engine")
+            _dispose_health_engine()
+            _health_flush_running = False
+            _health_flush_generation += 1
+
+        rows = list(_health_buf)
         _health_buf = []
-        return
+        _health_flush_running = True
+        _health_flush_started_ts = now_ts
+        _health_flush_generation += 1
+        generation = _health_flush_generation
+        _last_health_flush_ts = now_ts
 
-    ins = text(f"""
-        INSERT INTO {LOG_FQN} (end_day, end_time, info, contents)
-        VALUES (:end_day, :end_time, :info, :contents)
-    """)
-
-    rows = df.to_dict("records")
+    def _worker(rows_to_write: List[Dict[str, str]], worker_generation: int) -> None:
+        global _health_flush_running
+        try:
+            df = pd.DataFrame(rows_to_write, columns=["end_day", "end_time", "info", "contents"])
+            if not df.empty:
+                ins = text(f"""
+                    INSERT INTO {LOG_FQN} (end_day, end_time, info, contents)
+                    VALUES (:end_day, :end_time, :info, :contents)
+                """)
+                health_engine = get_health_engine()
+                with health_engine.begin() as conn:
+                    conn.execute(ins, df.to_dict("records"))
+        except Exception as e:
+            _dispose_health_engine()
+            log_console(f"[LOG-DB][SKIP] {type(e).__name__}: {e}")
+        finally:
+            with _health_flush_lock:
+                if worker_generation == _health_flush_generation:
+                    _health_flush_running = False
 
     try:
-        with engine.begin() as conn:
-            conn.execute(ins, rows)
-        _health_buf = []
-        _last_health_flush_ts = now_ts
+        threading.Thread(target=_worker, args=(rows, generation), daemon=True).start()
     except Exception as e:
-        # 헬스 로그는 best-effort: 실패해도 메인 루프를 막지 않음
-        log_console(f"[LOG-DB][SKIP] {type(e).__name__}: {e}")
-        _last_health_flush_ts = now_ts
-
+        with _health_flush_lock:
+            _health_buf = rows + _health_buf
+            _health_flush_running = False
+        log_console(f"[LOG-DB][SKIP] failed to start async flush | {type(e).__name__}: {e}")
+    return
 
 # =========================
 # 6) CURSOR
@@ -605,15 +693,32 @@ def main() -> None:
     log_console("[BOOT] start d6_MES_fail2_wasted_time (replacement)")
     log_console(f"[CFG ] db={_masked_db()} sleep={LOOP_SLEEP_SEC}s work_mem={WORK_MEM}")
     log_console(f"[CFG ] stmt_timeout={STMT_TIMEOUT_MS}ms lock_timeout={LOCK_TIMEOUT_MS}ms idle_in_tx={IDLE_IN_TX_TIMEOUT_MS}ms")
+    log_console(f"[CFG ] db_connect_max_wait={DB_CONNECT_MAX_WAIT_SEC}s health_flush_timeout={HEALTH_FLUSH_TIMEOUT_SEC}s")
     log_console(f"[CFG ] warm_start_lookback_min={WARM_START_LOOKBACK_MIN} stations={STATIONS} goodorbad={GOODORBAD_VALUE}")
     log_console(f"[CFG ] dst={DST_FQN} log={LOG_FQN}")
 
-    engine = get_engine_blocking()
+    while True:
+        try:
+            engine = get_engine_blocking()
+            break
+        except DbUnavailable as e:
+            log_console(f"[DB][WAIT] startup reconnect window expired | {e}")
+            time.sleep(DB_RETRY_INTERVAL_SEC)
 
-    # DDL ensure (blocking)
-    ensure_dest_table(engine)
-    ensure_demon_log_table(engine)
-    logx(engine, "info", "[DDL] ensured dest table + demon log table")
+    # DDL ensure
+    while True:
+        try:
+            ensure_dest_table(engine)
+            ensure_demon_log_table(engine)
+            logx(engine, "info", "[DDL] ensured dest table + demon log table")
+            break
+        except DbUnavailable as e:
+            log_console(f"[DB][WAIT] startup DDL reconnect window expired | {e}")
+            time.sleep(DB_RETRY_INTERVAL_SEC)
+            try:
+                engine = get_engine_blocking()
+            except DbUnavailable as e2:
+                log_console(f"[DB][WAIT] startup DDL reconnect retry expired | {e2}")
 
     # Warm-start 1회
     try:
@@ -652,13 +757,17 @@ def main() -> None:
             logx(engine, "error", f"[ERROR] {type(e).__name__}: {e}")
             flush_health_logs(engine, force=False)
 
-            logx(engine, "down", "[RECOVER] dispose engine -> reconnect blocking...")
+            logx(engine, "down", "[RECOVER] dispose engine -> reconnect with bounded wait...")
             try:
                 _dispose_engine()
             except Exception:
                 pass
 
-            engine = get_engine_blocking()
+            try:
+                engine = get_engine_blocking()
+            except DbUnavailable as e:
+                log_console(f"[RECOVER][WAIT] reconnect window expired | {e}")
+                continue
 
             try:
                 ensure_dest_table(engine)
