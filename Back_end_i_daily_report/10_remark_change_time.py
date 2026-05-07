@@ -10,7 +10,7 @@ backend10_remark_change_daemon.py
 5) DB 접속 실패 시 무한 재시도(블로킹)
 6) 접속 후 중간 끊김도 무한 재접속
 7) 연결 1개 고정(pool 최소화)
-8) work_mem 폭증 방지: env(PG_WORK_MEM) 읽고 없으면 4MB, 연결 시 SET work_mem
+8) work_mem 폭증 방지: env(PG_WORK_MEM) 읽고 없으면 64MB, 연결 시 SET work_mem
 9) 증분 조건: (end_day, station, end_time) 기반 (내부 비교는 end_ts + station 정렬/커서)
 10) seen_pk: set[(end_day, station, end_time)] 중복 방지 캐시
 11) 실행 즉시 [BOOT], DB 미접속 시 [RETRY] 5초마다
@@ -40,6 +40,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, date, time as dtime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Dict, Optional, Tuple, Set, List
 
@@ -77,7 +78,11 @@ LOG_SCHEMA = "k_demon_heath_check"
 LOG_TABLE = "10_log"
 
 SLEEP_SEC = 5
-WORK_MEM_DEFAULT = "4MB"
+WORK_MEM_DEFAULT = "64MB"
+STATEMENT_TIMEOUT_DEFAULT = "120s"
+CONNECT_TIMEOUT_DEFAULT = "10"
+SRC_WINDOW_INDEX = "idx_fv_testlog_remark_window_day_time_station"
+HEARTBEAT_FILE = Path(os.getenv("REMARK_CHANGE_HEARTBEAT", "") or Path(__file__).with_suffix(".heartbeat"))
 
 
 # =========================
@@ -107,6 +112,19 @@ def get_work_mem() -> str:
     return v if v else WORK_MEM_DEFAULT
 
 
+def get_statement_timeout() -> str:
+    v = os.getenv("PG_STATEMENT_TIMEOUT", "").strip()
+    return v if v else STATEMENT_TIMEOUT_DEFAULT
+
+
+def get_connect_timeout() -> int:
+    v = os.getenv("PG_CONNECT_TIMEOUT", "").strip()
+    try:
+        return max(1, int(v)) if v else int(CONNECT_TIMEOUT_DEFAULT)
+    except ValueError:
+        return int(CONNECT_TIMEOUT_DEFAULT)
+
+
 def make_engine() -> Engine:
     url = (
         f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
@@ -118,7 +136,21 @@ def make_engine() -> Engine:
         max_overflow=0,
         pool_pre_ping=True,
         pool_recycle=1800,
+        pool_timeout=get_connect_timeout(),
+        connect_args={
+            "connect_timeout": get_connect_timeout(),
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
+            "options": f"-c work_mem={get_work_mem()} -c statement_timeout={get_statement_timeout()}",
+        },
     )
+
+
+def configure_session(conn, work_mem: str, statement_timeout: str) -> None:
+    conn.execute(text(f"SET work_mem = '{work_mem}'"))
+    conn.execute(text(f"SET statement_timeout = '{statement_timeout}'"))
 
 
 # =========================
@@ -192,22 +224,34 @@ def write_log_db(engine: Optional[Engine], info: str, contents: str) -> None:
         pass
 
 
+def write_heartbeat(status: str) -> None:
+    try:
+        HEARTBEAT_FILE.write_text(
+            f"{datetime.now(KST).isoformat()} {status}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def log(level: str, msg: str, engine: Optional[Engine] = None) -> None:
     now_txt = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     print(f"{now_txt} [{level}] {msg}")
+    write_heartbeat(f"{level} {msg}")
     info = _map_level_to_info(level, msg)
     write_log_db(engine, info, msg)
 
 
 def connect_with_retry() -> Engine:
     work_mem = get_work_mem()
+    statement_timeout = get_statement_timeout()
     while True:
         try:
             engine = make_engine()
             with engine.begin() as conn:
-                conn.execute(text(f"SET work_mem = '{work_mem}'"))
+                configure_session(conn, work_mem, statement_timeout)
             ensure_log_table(engine)
-            log("INFO", f"DB connected (work_mem={work_mem})", engine)
+            log("INFO", f"DB connected (work_mem={work_mem}, statement_timeout={statement_timeout})", engine)
             return engine
         except Exception as e:
             # engine 미생성/접속불가 상태에서도 콘솔은 출력
@@ -313,6 +357,17 @@ def ensure_schema_and_tables(engine: Engine) -> None:
         )
 
 
+def ensure_source_indexes(engine: Engine) -> None:
+    sql = f"""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS "{SRC_WINDOW_INDEX}"
+        ON {src_fqn()} (end_day, end_time, station, remark);
+    """
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text("SET statement_timeout = 0"))
+        conn.execute(text(sql))
+        configure_session(conn, get_work_mem(), get_statement_timeout())
+
+
 def insert_events(engine: Engine, table_fqn: str, rows: List[dict]) -> int:
     if not rows:
         return 0
@@ -337,7 +392,13 @@ def insert_events(engine: Engine, table_fqn: str, rows: List[dict]) -> int:
 # =========================
 # 6) 소스 fetch
 # =========================
+def _dt_day_time(dt: datetime) -> Tuple[str, str]:
+    return dt.strftime("%Y%m%d"), dt.strftime("%H:%M:%S")
+
+
 def fetch_source_range(engine: Engine, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    start_day, start_time = _dt_day_time(start_dt)
+    end_day, end_time = _dt_day_time(end_dt)
     sql = text(
         f"""
         SELECT
@@ -349,9 +410,9 @@ def fetch_source_range(engine: Engine, start_dt: datetime, end_dt: datetime) -> 
         FROM {src_fqn()}
         WHERE station = ANY(:stations)
           AND remark  = ANY(:remarks)
-          AND to_timestamp(end_day || ' ' || end_time, 'YYYYMMDD HH24:MI:SS')::timestamp
-              BETWEEN :start_dt AND :end_dt
-        ORDER BY end_ts, station
+          AND (end_day > :start_day OR (end_day = :start_day AND end_time >= :start_time))
+          AND (end_day < :end_day OR (end_day = :end_day AND end_time <= :end_time))
+        ORDER BY end_day, end_time, station
         """
     )
     with engine.begin() as conn:
@@ -361,8 +422,10 @@ def fetch_source_range(engine: Engine, start_dt: datetime, end_dt: datetime) -> 
             params={
                 "stations": list(STATIONS),
                 "remarks": list(REMARKS),
-                "start_dt": start_dt,
-                "end_dt": end_dt,
+                "start_day": start_day,
+                "start_time": start_time,
+                "end_day": end_day,
+                "end_time": end_time,
             },
         )
     if df.empty:
@@ -385,6 +448,9 @@ def fetch_source_incremental(engine: Engine, start_dt: datetime, end_dt: datetim
     if cur.last_ts is None:
         return fetch_source_range(engine, start_dt, end_dt)
 
+    start_day, start_time = _dt_day_time(start_dt)
+    end_day, end_time = _dt_day_time(end_dt)
+    last_day, last_time = _dt_day_time(cur.last_ts)
     sql = text(
         f"""
         SELECT
@@ -396,16 +462,19 @@ def fetch_source_incremental(engine: Engine, start_dt: datetime, end_dt: datetim
         FROM {src_fqn()}
         WHERE station = ANY(:stations)
           AND remark  = ANY(:remarks)
-          AND to_timestamp(end_day || ' ' || end_time, 'YYYYMMDD HH24:MI:SS')::timestamp
-              BETWEEN :start_dt AND :end_dt
+          AND (end_day > :start_day OR (end_day = :start_day AND end_time >= :start_time))
+          AND (end_day < :end_day OR (end_day = :end_day AND end_time <= :end_time))
           AND (
-                to_timestamp(end_day || ' ' || end_time, 'YYYYMMDD HH24:MI:SS')::timestamp > :last_ts
+                end_day > :last_day
                 OR (
-                    to_timestamp(end_day || ' ' || end_time, 'YYYYMMDD HH24:MI:SS')::timestamp = :last_ts
-                    AND station > :last_station
+                    end_day = :last_day
+                    AND (
+                        end_time > :last_time
+                        OR (end_time = :last_time AND station > :last_station)
+                    )
                 )
           )
-        ORDER BY end_ts, station
+        ORDER BY end_day, end_time, station
         """
     )
     with engine.begin() as conn:
@@ -415,9 +484,12 @@ def fetch_source_incremental(engine: Engine, start_dt: datetime, end_dt: datetim
             params={
                 "stations": list(STATIONS),
                 "remarks": list(REMARKS),
-                "start_dt": start_dt,
-                "end_dt": end_dt,
-                "last_ts": cur.last_ts,
+                "start_day": start_day,
+                "start_time": start_time,
+                "end_day": end_day,
+                "end_time": end_time,
+                "last_day": last_day,
+                "last_time": last_time,
                 "last_station": cur.last_station,
             },
         )
@@ -481,6 +553,11 @@ def run():
     engine = connect_with_retry()
     ensure_schema_and_tables(engine)
     ensure_log_table(engine)
+    try:
+        ensure_source_indexes(engine)
+        log("INFO", f"[INDEX] source index ready = {SRC_WINDOW_INDEX}", engine)
+    except Exception as e:
+        log("RETRY", f"[INDEX] source index skipped: {type(e).__name__}: {e}", engine)
 
     current_window_id: Optional[Tuple[str, str]] = None
     cur = LastCursor()
@@ -494,6 +571,7 @@ def run():
             w = calc_window(now)
             window_id = (w.prod_day, w.shift_type)
             table_fqn = day_fqn() if w.shift_type == "day" else night_fqn()
+            write_heartbeat(f"loop prod_day={w.prod_day} shift={w.shift_type}")
 
             # window changed => bootstrap
             if window_id != current_window_id:
@@ -644,6 +722,11 @@ def run():
             engine = connect_with_retry()
             ensure_schema_and_tables(engine)
             ensure_log_table(engine)
+            try:
+                ensure_source_indexes(engine)
+                log("INFO", f"[INDEX] source index ready = {SRC_WINDOW_INDEX}", engine)
+            except Exception as idx_e:
+                log("RETRY", f"[INDEX] source index skipped: {type(idx_e).__name__}: {idx_e}", engine)
             current_window_id = None
             log("INFO", f"sleep {SLEEP_SEC}s", engine)
             time.sleep(SLEEP_SEC)
