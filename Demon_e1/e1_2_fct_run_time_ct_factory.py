@@ -23,6 +23,7 @@ import os
 import time as time_mod
 import urllib.parse
 import multiprocessing as mp
+import threading
 from datetime import date, datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +34,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, DBAPIError
+from sqlalchemy.pool import NullPool
 
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -57,10 +59,14 @@ BATCH_FETCH_TIMEOUT_MS = int(os.getenv("E1_2_BATCH_FETCH_TIMEOUT_MS", "600000"))
 UPSERT_TIMEOUT_MS = int(os.getenv("E1_2_UPSERT_TIMEOUT_MS", "300000"))              # 5분
 LOCK_TIMEOUT_MS = int(os.getenv("PG_LOCK_TIMEOUT_MS", "5000"))
 LOG_TIMEOUT_MS = int(os.getenv("E1_2_LOG_TIMEOUT_MS", "5000"))
+PG_CONNECT_TIMEOUT_SEC = int(os.getenv("PG_CONNECT_TIMEOUT_SEC", "10"))
+PG_TCP_USER_TIMEOUT_MS = int(os.getenv("PG_TCP_USER_TIMEOUT_MS", "0"))
+HEARTBEAT_DB_WRITE_TIMEOUT_SEC = int(os.getenv("E1_2_HEARTBEAT_DB_WRITE_TIMEOUT_SEC", "10"))
 
 IDLE_LOG_INTERVAL_SEC = int(os.getenv("E1_2_IDLE_LOG_INTERVAL_SEC", "60"))
 SLEEP_LOG_INTERVAL_SEC = int(os.getenv("E1_2_SLEEP_LOG_INTERVAL_SEC", "60"))
 HEARTBEAT_INTERVAL_SEC = int(os.getenv("E1_2_HEARTBEAT_INTERVAL_SEC", "60"))
+LOG_DB_WRITE_TIMEOUT_SEC = int(os.getenv("E1_2_LOG_DB_WRITE_TIMEOUT_SEC", "10"))
 
 ENABLE_STDOUT_PRINT = os.getenv("E1_2_ENABLE_STDOUT_PRINT", "1") == "1"
 
@@ -70,7 +76,9 @@ DAILY_BATCH_START_HMS = (
     int(os.getenv("E1_2_BATCH_START_SECOND", "10")),
 )
 
-STATUS_FILE = os.getenv("E1_2_STATUS_FILE", os.path.join(os.getcwd(), "e1_2_status.txt"))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATUS_FILE = os.getenv("E1_2_STATUS_FILE", os.path.join(SCRIPT_DIR, "e1_2_status.txt"))
+HEARTBEAT_FILE = os.getenv("E1_2_HEARTBEAT_FILE", os.path.join(SCRIPT_DIR, "e1_2_heartbeat.txt"))
 
 
 # =========================
@@ -93,6 +101,19 @@ def _make_url(app_name: str) -> str:
         f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
         f"?application_name={app}"
     )
+
+
+def _pg_connect_args() -> dict:
+    args = {
+        "connect_timeout": PG_CONNECT_TIMEOUT_SEC,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    }
+    if PG_TCP_USER_TIMEOUT_MS > 0:
+        args["tcp_user_timeout"] = PG_TCP_USER_TIMEOUT_MS
+    return args
 
 
 # =========================
@@ -182,6 +203,16 @@ def read_status_file() -> str:
         return "status_unavailable"
 
 
+def write_heartbeat_file(message: str) -> None:
+    try:
+        tmp = HEARTBEAT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(f"{_fmt_now()}|{message}")
+        os.replace(tmp, HEARTBEAT_FILE)
+    except Exception:
+        pass
+
+
 # =========================
 # Session apply helpers
 # =========================
@@ -222,6 +253,7 @@ def make_data_engine() -> Engine:
         pool_pre_ping=True,
         pool_recycle=1800,
         pool_timeout=30,
+        connect_args=_pg_connect_args(),
     )
 
 
@@ -235,6 +267,7 @@ def make_log_engine() -> Engine:
         pool_pre_ping=True,
         pool_recycle=1800,
         pool_timeout=30,
+        connect_args=_pg_connect_args(),
     )
 
 
@@ -243,11 +276,9 @@ def make_heartbeat_engine() -> Engine:
     os.environ.setdefault("PGOPTIONS", "-c client_encoding=UTF8")
     return create_engine(
         _make_url(APP_NAME_HEARTBEAT),
-        pool_size=1,
-        max_overflow=1,
+        poolclass=NullPool,
         pool_pre_ping=True,
-        pool_recycle=1800,
-        pool_timeout=10,
+        connect_args=_pg_connect_args(),
     )
 
 
@@ -295,15 +326,81 @@ def insert_health_log_with_engine(
         conn.execute(sql, [row])
 
 
+def insert_heartbeat_log_with_timeout(info: str, msg: str) -> bool:
+    errors: List[str] = []
+
+    def worker() -> None:
+        engine: Optional[Engine] = None
+        try:
+            engine = make_heartbeat_engine()
+            insert_health_log_with_engine(engine, "INFO", info, msg)
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+        finally:
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=worker, name="e1_2_heartbeat_db_write", daemon=True)
+    t.start()
+    t.join(HEARTBEAT_DB_WRITE_TIMEOUT_SEC)
+
+    if t.is_alive():
+        _safe_print(
+            f"{_fmt_now()} [WARN] heartbeat DB write timed out "
+            f"after {HEARTBEAT_DB_WRITE_TIMEOUT_SEC}s"
+        )
+        return False
+
+    if errors:
+        _safe_print(f"{_fmt_now()} [WARN] heartbeat DB write failed: {errors[-1]}")
+        return False
+
+    return True
+
+
+def insert_health_log_with_timeout(
+    level_tag: str,
+    info: str,
+    msg: str,
+    timeout_sec: int = LOG_DB_WRITE_TIMEOUT_SEC,
+) -> Tuple[bool, Optional[str]]:
+    errors: List[str] = []
+
+    def worker() -> None:
+        engine: Optional[Engine] = None
+        try:
+            engine = make_log_engine()
+            insert_health_log_with_engine(engine, level_tag, info, msg)
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+        finally:
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=worker, name="e1_2_log_db_write", daemon=True)
+    t.start()
+    t.join(timeout_sec)
+
+    if t.is_alive():
+        return False, f"timeout after {timeout_sec}s"
+    if errors:
+        return False, errors[-1]
+    return True, None
+
+
 def _emit(level_tag: str, info: str, msg: str, persist: bool = True) -> None:
-    global _LOG_ENGINE
     db_log_err: Optional[str] = None
 
-    if persist and _LOG_ENGINE is not None:
-        try:
-            insert_health_log_with_engine(_LOG_ENGINE, level_tag, info, msg)
-        except Exception as e:
-            db_log_err = f"{type(e).__name__}: {e}"
+    if persist:
+        ok, err = insert_health_log_with_timeout(level_tag, info, msg)
+        if not ok:
+            db_log_err = err
 
     _safe_print(f"{_fmt_now()} [{level_tag}] {msg}")
 
@@ -667,6 +764,7 @@ def build_month_df_upto(engine: Engine, stations: List[str], target_day: str) ->
     write_status_file(f"batch_running build_month month={target_day[:6]} upto={target_day} days={len(days)}")
 
     for d in days:
+        log_info(f"[DAY_FETCH] start day={d}")
         write_status_file(f"batch_running day_fetch={d}")
         df_day = fetch_one_day(engine, stations, d)
         log_info(f"[DAY_FETCH] day={d} rows={len(df_day)}")
@@ -971,6 +1069,26 @@ def reconnect_data_engine() -> Tuple[Engine, Engine]:
             log_retry(f"reconnect failed: {type(e).__name__}: {e}")
 
 
+def start_heartbeat_process() -> mp.Process:
+    proc = mp.Process(target=heartbeat_worker, name="e1_2_heartbeat", daemon=True)
+    proc.start()
+    _safe_print(f"{_fmt_now()} [INFO] heartbeat process started pid={proc.pid}")
+    return proc
+
+
+def ensure_heartbeat_process(proc: mp.Process) -> mp.Process:
+    if proc.is_alive():
+        return proc
+
+    exitcode = proc.exitcode
+    _safe_print(f"{_fmt_now()} [WARN] heartbeat process stopped exitcode={exitcode}; restarting")
+    try:
+        proc.close()
+    except Exception:
+        pass
+    return start_heartbeat_process()
+
+
 def missing_days_to_process(last_processed_day: Optional[str], target_day: str) -> List[str]:
     target_dt = parse_day_str(target_day)
     month_start_dt = parse_day_str(month_start_day_str(target_day))
@@ -1040,23 +1158,19 @@ def run_daily_batch(
 # Heartbeat process
 # =========================
 def heartbeat_worker() -> None:
-    engine: Optional[Engine] = None
-
     while True:
         try:
-            if engine is None:
-                engine = make_heartbeat_engine()
-                ensure_log_table(engine)
-
             status = read_status_file()
             msg = f"alive {status}"
+            write_heartbeat_file(msg)
 
-            insert_health_log_with_engine(engine, "INFO", "heartbeat", msg)
-            _safe_print(f"{_fmt_now()} [INFO] HEARTBEAT {msg}")
+            if insert_heartbeat_log_with_timeout("heartbeat", msg):
+                _safe_print(f"{_fmt_now()} [INFO] HEARTBEAT {msg}")
+            else:
+                _safe_print(f"{_fmt_now()} [WARN] HEARTBEAT local-only {msg}")
 
         except Exception as e:
             _safe_print(f"{_fmt_now()} [WARN] heartbeat worker error: {type(e).__name__}: {e}")
-            engine = None
 
         time_mod.sleep(HEARTBEAT_INTERVAL_SEC)
 
@@ -1068,8 +1182,7 @@ def main() -> None:
     write_status_file("booting")
     log_boot("e1_2 fct_runtime_ct daemon starting (daily batch mode + heartbeat process)")
 
-    heartbeat_proc = mp.Process(target=heartbeat_worker, name="e1_2_heartbeat", daemon=True)
-    heartbeat_proc.start()
+    heartbeat_proc = start_heartbeat_process()
 
     data_engine, _ = connect_blocking()
 
@@ -1123,6 +1236,7 @@ def main() -> None:
         loop_start = time_mod.time()
 
         try:
+            heartbeat_proc = ensure_heartbeat_process(heartbeat_proc)
             now = _ts_kst()
             cur_month = current_yyyymm(now)
             target_day = yesterday_day_str(now)
