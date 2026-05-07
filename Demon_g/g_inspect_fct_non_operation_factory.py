@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Factory Realtime - FCT Non Operation Time Inspector (final)
 
@@ -813,6 +813,7 @@ def _append_event(
     to_time: str,
     diff_sec: float,
     manual_flag: str | None,
+    is_open: bool = False,
 ):
     if diff_sec is None:
         return
@@ -830,8 +831,42 @@ def _append_event(
         "to_time": str(to_time),
         "no_operation_time": diff_val,
         "manual": manual_flag,
+        "is_open": bool(is_open),
     })
 
+
+def _hms_from_dt(dt: datetime) -> str:
+    return dt.strftime("%H:%M:%S")
+
+
+def _append_open_event_if_threshold_exceeded(
+    events: list,
+    end_day: str,
+    station: str,
+    pending_result_time: str | None,
+    pending_result_ts: datetime | None,
+    manual_seen: int,
+    th_val: float,
+):
+    if pending_result_time is None or pending_result_ts is None:
+        return
+
+    now_dt = now_ts()
+    if now_dt <= pending_result_ts:
+        return
+
+    diff = (now_dt - pending_result_ts).total_seconds()
+    if diff > 0 and diff > th_val:
+        _append_event(
+            events=events,
+            end_day=end_day,
+            station=station,
+            from_time=pending_result_time,
+            to_time=_hms_from_dt(now_dt),
+            diff_sec=diff,
+            manual_flag="o" if manual_seen else None,
+            is_open=True,
+        )
 
 def compute_events_for_station(
     station: str,
@@ -848,17 +883,26 @@ def compute_events_for_station(
     manual_block = int(prev_state.get("manual_block") or 0)
     manual_seen = int(prev_state.get("manual_seen") or 0)
 
+    th_val = threshold_for_station(th_map, station)
+    events = []
+
     if not rows:
+        _append_open_event_if_threshold_exceeded(
+            events=events,
+            end_day=end_day,
+            station=station,
+            pending_result_time=pending_result_time,
+            pending_result_ts=pending_result_ts,
+            manual_seen=manual_seen,
+            th_val=th_val,
+        )
         new_state = {
             "last_id": max_id,
             "pending_result_time": pending_result_time,
             "manual_block": manual_block,
             "manual_seen": manual_seen,
         }
-        return station, new_state, []
-
-    th_val = threshold_for_station(th_map, station)
-    events = []
+        return station, new_state, events
 
     for row in rows:
         event_type = row["_event_type"]
@@ -895,6 +939,7 @@ def compute_events_for_station(
                         to_time=cur_end_time,
                         diff_sec=diff,
                         manual_flag="o" if manual_seen else None,
+                        is_open=False,
                     )
 
             pending_result_time = None
@@ -903,9 +948,19 @@ def compute_events_for_station(
             manual_seen = 0
             continue
 
+    _append_open_event_if_threshold_exceeded(
+        events=events,
+        end_day=end_day,
+        station=station,
+        pending_result_time=pending_result_time,
+        pending_result_ts=pending_result_ts,
+        manual_seen=manual_seen,
+        th_val=th_val,
+    )
+
     dedup = {}
     for ev in events:
-        key = (ev["end_day"], ev["station"], ev["from_time"], ev["to_time"])
+        key = (ev["end_day"], ev["station"], ev["from_time"], ev["to_time"], bool(ev.get("is_open", False)))
         if key not in dedup:
             dedup[key] = ev
 
@@ -920,7 +975,6 @@ def compute_events_for_station(
 
     return station, new_state, out
 
-
 # =========================
 # 6) save
 # =========================
@@ -934,6 +988,7 @@ def ensure_target_table(engine):
         to_time           TEXT NOT NULL,
         no_operation_time NUMERIC(12,2),
         manual            TEXT NULL,
+        is_open           BOOLEAN NOT NULL DEFAULT false,
         created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (end_day, station, from_time, to_time)
@@ -943,6 +998,11 @@ def ensure_target_table(engine):
     alter_manual = text(f"""
         ALTER TABLE {SAVE_SCHEMA}.{SAVE_TABLE}
         ADD COLUMN IF NOT EXISTS manual TEXT NULL
+    """)
+
+    alter_is_open = text(f"""
+        ALTER TABLE {SAVE_SCHEMA}.{SAVE_TABLE}
+        ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT false
     """)
 
     alter_created_at = text(f"""
@@ -959,13 +1019,16 @@ def ensure_target_table(engine):
         _session_guard(conn)
         conn.execute(ddl)
         conn.execute(alter_manual)
+        conn.execute(alter_is_open)
         conn.execute(alter_created_at)
         conn.execute(alter_updated_at)
 
 
 def upsert_events(engine, events: list[dict]) -> int:
     """
-    신규 이벤트는 즉시 upsert
+    신규/진행중 이벤트는 즉시 upsert
+    - is_open=true: 같은 end_day/station/from_time 진행중 행의 to_time을 계속 갱신
+    - is_open=false: 진행중 행이 있으면 최종 to_time으로 닫고, 없으면 기존 PK 기준 upsert
     동일 값이면 update 안 함
     """
     if not events:
@@ -973,7 +1036,7 @@ def upsert_events(engine, events: list[dict]) -> int:
 
     ensure_target_table(engine)
 
-    values = []
+    normalized = []
     for ev in events:
         try:
             val = float(ev["no_operation_time"])
@@ -986,54 +1049,131 @@ def upsert_events(engine, events: list[dict]) -> int:
         if manual_val is not None:
             manual_val = str(manual_val).strip() or None
 
-        values.append((
-            str(ev["end_day"]),
-            str(ev["station"]),
-            str(ev["from_time"]),
-            str(ev["to_time"]),
-            round(val, 2),
-            manual_val,
-        ))
+        normalized.append({
+            "end_day": str(ev["end_day"]),
+            "station": str(ev["station"]),
+            "from_time": str(ev["from_time"]),
+            "to_time": str(ev["to_time"]),
+            "no_operation_time": round(val, 2),
+            "manual": manual_val,
+            "is_open": bool(ev.get("is_open", False)),
+        })
 
-    if not values:
+    if not normalized:
         return 0
 
-    sql = f"""
+    update_open_sql = text(f"""
+        UPDATE {SAVE_SCHEMA}.{SAVE_TABLE}
+        SET
+            to_time = :to_time,
+            no_operation_time = :no_operation_time,
+            manual = :manual,
+            is_open = true,
+            updated_at = now()
+        WHERE end_day = :end_day
+          AND station = :station
+          AND from_time = :from_time
+          AND is_open = true
+    """)
+
+    insert_open_sql = text(f"""
         INSERT INTO {SAVE_SCHEMA}.{SAVE_TABLE}
-        (end_day, station, from_time, to_time, no_operation_time, manual)
-        VALUES %s
+        (end_day, station, from_time, to_time, no_operation_time, manual, is_open)
+        VALUES
+        (:end_day, :station, :from_time, :to_time, :no_operation_time, :manual, true)
         ON CONFLICT (end_day, station, from_time, to_time)
         DO UPDATE SET
             no_operation_time = EXCLUDED.no_operation_time,
             manual = EXCLUDED.manual,
+            is_open = true,
             updated_at = now()
         WHERE
             {SAVE_SCHEMA}.{SAVE_TABLE}.no_operation_time IS DISTINCT FROM EXCLUDED.no_operation_time
             OR {SAVE_SCHEMA}.{SAVE_TABLE}.manual IS DISTINCT FROM EXCLUDED.manual
-    """
+            OR {SAVE_SCHEMA}.{SAVE_TABLE}.is_open IS DISTINCT FROM true
+    """)
 
-    raw = engine.raw_connection()
-    cur = None
-    try:
-        cur = raw.cursor()
-        cur.execute(f"SET work_mem TO '{WORK_MEM}'")
-        if STATEMENT_TIMEOUT_MS is not None:
-            cur.execute(f"SET statement_timeout TO {int(STATEMENT_TIMEOUT_MS)}")
-        execute_values(cur, sql, values, page_size=1000)
-        raw.commit()
-    except Exception:
-        raw.rollback()
-        raise
-    finally:
+    close_open_sql = text(f"""
+        UPDATE {SAVE_SCHEMA}.{SAVE_TABLE}
+        SET
+            to_time = :to_time,
+            no_operation_time = :no_operation_time,
+            manual = :manual,
+            is_open = false,
+            updated_at = now()
+        WHERE end_day = :end_day
+          AND station = :station
+          AND from_time = :from_time
+          AND is_open = true
+    """)
+
+    insert_final_values = []
+    touched = 0
+
+    with engine.begin() as conn:
+        _session_guard(conn)
+        for ev in normalized:
+            if ev["is_open"]:
+                res = conn.execute(update_open_sql, ev)
+                if int(res.rowcount or 0) == 0:
+                    conn.execute(insert_open_sql, ev)
+                touched += 1
+                continue
+
+            res = conn.execute(close_open_sql, ev)
+            if int(res.rowcount or 0) > 0:
+                touched += 1
+            else:
+                insert_final_values.append((
+                    ev["end_day"],
+                    ev["station"],
+                    ev["from_time"],
+                    ev["to_time"],
+                    ev["no_operation_time"],
+                    ev["manual"],
+                    False,
+                ))
+
+    if insert_final_values:
+        sql = f"""
+            INSERT INTO {SAVE_SCHEMA}.{SAVE_TABLE}
+            (end_day, station, from_time, to_time, no_operation_time, manual, is_open)
+            VALUES %s
+            ON CONFLICT (end_day, station, from_time, to_time)
+            DO UPDATE SET
+                no_operation_time = EXCLUDED.no_operation_time,
+                manual = EXCLUDED.manual,
+                is_open = false,
+                updated_at = now()
+            WHERE
+                {SAVE_SCHEMA}.{SAVE_TABLE}.no_operation_time IS DISTINCT FROM EXCLUDED.no_operation_time
+                OR {SAVE_SCHEMA}.{SAVE_TABLE}.manual IS DISTINCT FROM EXCLUDED.manual
+                OR {SAVE_SCHEMA}.{SAVE_TABLE}.is_open IS DISTINCT FROM false
+        """
+
+        raw = engine.raw_connection()
+        cur = None
         try:
-            if cur is not None:
-                cur.close()
+            cur = raw.cursor()
+            cur.execute(f"SET work_mem TO '{WORK_MEM}'")
+            if STATEMENT_TIMEOUT_MS is not None:
+                cur.execute(f"SET statement_timeout TO {int(STATEMENT_TIMEOUT_MS)}")
+            execute_values(cur, sql, insert_final_values, page_size=1000)
+            raw.commit()
         except Exception:
-            pass
-        raw.close()
+            raw.rollback()
+            raise
+        finally:
+            try:
+                if cur is not None:
+                    cur.close()
+            except Exception:
+                pass
+            raw.close()
 
-    return len(values)
+        touched += len(insert_final_values)
 
+    return touched
 
 # =========================
 # 7) main once
@@ -1220,3 +1360,4 @@ if __name__ == "__main__":
         pass
 
     main()
+

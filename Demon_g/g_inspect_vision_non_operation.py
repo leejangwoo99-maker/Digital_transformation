@@ -82,7 +82,6 @@ RESTART_LOOKBACK_MINUTES = 30
 
 PG_WORK_MEM = (os.getenv("PG_WORK_MEM", "4MB") or "4MB").strip()
 APP_NAME = DAEMON_NAME
-ADVISORY_LOCK_KEY = 2026021102
 
 DB_HEARTBEAT_INTERVAL_SEC = 60.0
 IDLE_LOG_INTERVAL_SEC = 60.0
@@ -445,74 +444,6 @@ def heartbeat_upsert(
 
 
 # -----------------------------
-# advisory lock
-# -----------------------------
-def acquire_singleton_lock_blocking():
-    while True:
-        if _shutdown_requested:
-            raise KeyboardInterrupt("shutdown requested during advisory lock acquire")
-
-        conn = None
-        try:
-            conn = psycopg2.connect(
-                host=DB_CONFIG["host"],
-                port=DB_CONFIG["port"],
-                dbname=DB_CONFIG["dbname"],
-                user=DB_CONFIG["user"],
-                password=DB_CONFIG["password"],
-                application_name=f"{APP_NAME}_lock",
-            )
-            conn.autocommit = True
-
-            with conn.cursor() as cur:
-                cur.execute("SET lock_timeout = '5s'")
-                cur.execute("SET statement_timeout = '10s'")
-                cur.execute("SELECT pg_try_advisory_lock(%s)", (ADVISORY_LOCK_KEY,))
-                got = cur.fetchone()[0]
-                if got:
-                    p("INFO", "advisory lock acquired")
-                    return conn
-
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-            p("RETRY", "another instance already running; waiting advisory lock...")
-            slept = 0
-            while slept < RETRY_SEC and not _shutdown_requested:
-                time.sleep(1)
-                slept += 1
-
-        except Exception as e:
-            p("WARN", f"advisory lock acquire failed: {repr(e)}")
-            try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
-
-            slept = 0
-            while slept < RETRY_SEC and not _shutdown_requested:
-                time.sleep(1)
-                slept += 1
-
-
-def release_singleton_lock(lock_conn) -> None:
-    if lock_conn is None:
-        return
-    try:
-        with lock_conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_unlock(%s)", (ADVISORY_LOCK_KEY,))
-    except Exception:
-        pass
-    try:
-        lock_conn.close()
-    except Exception:
-        pass
-
-
-# -----------------------------
 # 재시작 anchor 조회
 # -----------------------------
 def load_restart_anchors(engine: Engine) -> Dict[str, Optional[pd.Timestamp]]:
@@ -867,7 +798,6 @@ def run_daemon():
     _last_idle_log_epoch = 0.0
 
     engine: Optional[Engine] = None
-    lock_conn = None
 
     seen_state_by_day: Dict[str, Dict[Tuple[str, str, str, str], Optional[float]]] = {}
     last_pk: Optional[Tuple[str, str, str, str]] = None
@@ -889,9 +819,6 @@ def run_daemon():
                         ensure_log_table(conn)
                         ensure_heartbeat_table(conn)
                         ensure_save_table(conn)
-
-                    if lock_conn is None:
-                        lock_conn = acquire_singleton_lock_blocking()
 
                     restart_anchor_by_station = load_restart_anchors(engine)
                     p(
@@ -1042,14 +969,7 @@ def run_daemon():
                 except Exception:
                     pass
 
-                try:
-                    if lock_conn is not None:
-                        release_singleton_lock(lock_conn)
-                except Exception:
-                    pass
-
                 engine = None
-                lock_conn = None
                 first_loop_after_restart = True
 
                 slept = 0
@@ -1077,12 +997,6 @@ def run_daemon():
             if engine is not None:
                 log_db(engine, "stop", "graceful shutdown")
                 heartbeat_upsert(engine, "stopped", None, last_pk, "graceful shutdown")
-        except Exception:
-            pass
-
-        try:
-            if lock_conn is not None:
-                release_singleton_lock(lock_conn)
         except Exception:
             pass
 
