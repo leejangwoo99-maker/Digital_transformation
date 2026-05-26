@@ -257,7 +257,7 @@ SNAPSHOT_AFTER_READY_WAIT_SEC = _env_float("SNAPSHOT_AFTER_READY_WAIT_SEC", "SNA
 
 SNAP_READY_BLOCK_TEXT = _env(
     "SNAP_READY_BLOCK_TEXT",
-    default="데이터 조회 중...,데이터 조회 중,Loading...,Please wait,로딩 중,잠시만,조회중,조회 중,불러오는 중,데이터조회중,로딩중",
+    default="데이터 조회 중...,데이터 조회 중,Loading...,Please wait,로딩 중,잠시만,조회중,불러오는 중",
 ).strip()
 SNAP_READY_MUST_HAVE_TEXT = _env("SNAP_READY_MUST_HAVE_TEXT", default="").strip()
 
@@ -270,7 +270,7 @@ ADMIN_PASS = _env("ADMIN_PASS", default="").strip()
 SMTP_HOST = _env("SMTP_HOST", default="").strip()
 SMTP_PORT = _env_int("SMTP_PORT", default=587)
 SMTP_USER = _env("SMTP_USER", default="").strip()
-SMTP_PASS = _env("SMTP_PASS", default="").strip()
+SMTP_PASS = _env("SMTP_PASS", default="").strip()  #비번
 SMTP_FROM = _env("SMTP_FROM", default=(SMTP_USER or "")).strip()
 SMTP_TLS = _env_bool("SMTP_TLS", default=True)
 
@@ -323,6 +323,8 @@ SNAP_STATUS_FILE = _env("SNAP_STATUS_FILE", default=r"C:\AptivAgent\_state\snaps
 SNAP_EVENT_LOG_URL = _env("SNAP_EVENT_LOG_URL", default="").strip()
 
 SNAP_SCHED_SUBPROCESS = _env_bool("SNAP_SCHED_SUBPROCESS", default=True)
+SNAP_SCHED_FIRE_GUARD_FILE = _env("SNAP_SCHED_FIRE_GUARD_FILE", default=r"C:\AptivAgent\_state\snapshot_fire_guard.json").strip()
+SNAP_SCHED_FIRE_GUARD_SEC = _env_int("SNAP_SCHED_FIRE_GUARD_SEC", default=1800)
 
 SNAP_SCHED_HEARTBEAT_SEC = _env_int("SNAP_SCHED_HEARTBEAT_SEC", default=60)
 SNAP_SCHED_NEAR_SLOT_LOG_SEC = _env_int("SNAP_SCHED_NEAR_SLOT_LOG_SEC", default=5)
@@ -400,6 +402,7 @@ def _log_boot_config() -> None:
     _log(f"[BOOT] EVENT_LOG_URL={'SET' if SNAP_EVENT_LOG_URL else 'EMPTY'}")
     _log(f"[BOOT] LOCK_FILE={LOCK_FILE}")
     _log(f"[BOOT] LOCK_STALE_SEC={SNAP_LOCK_STALE_SEC}")
+    _log(f"[BOOT] FIRE_GUARD_FILE={SNAP_SCHED_FIRE_GUARD_FILE or 'EMPTY'} FIRE_GUARD_SEC={SNAP_SCHED_FIRE_GUARD_SEC}")
     _log(f"[BOOT] SENT_FILE={SENT_FILE}")
     _log(f"[BOOT] EMAIL_LIST_PATH={EMAIL_LIST_PATH} retry={EMAIL_LIST_RETRY} timeout=({EMAIL_LIST_CONNECT_TIMEOUT}, {EMAIL_LIST_READ_TIMEOUT})")
     _log(f"[BOOT] EXCLUDE_EMAILS count={len(_extract_emails_any(EXCLUDE_EMAILS))}")
@@ -512,6 +515,65 @@ def get_snapshot_scheduler_status() -> Dict[str, Any]:
             return json.load(f) or {"state": "unknown", "ts": None}
     except Exception:
         return {"state": "unknown", "ts": None}
+
+
+def _slot_fire_guard_key(slot_dt: datetime) -> str:
+    return slot_dt.astimezone(KST).strftime("%Y%m%d_%H%M%S")
+
+
+def _read_fire_guard() -> Dict[str, Any]:
+    if not SNAP_SCHED_FIRE_GUARD_FILE:
+        return {}
+    try:
+        with open(SNAP_SCHED_FIRE_GUARD_FILE, "r", encoding="utf-8") as f:
+            obj = json.loads(f.read() or "{}")
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_fire_guard(obj: Dict[str, Any]) -> None:
+    if not SNAP_SCHED_FIRE_GUARD_FILE:
+        return
+    try:
+        os.makedirs(os.path.dirname(SNAP_SCHED_FIRE_GUARD_FILE), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(SNAP_SCHED_FIRE_GUARD_FILE, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        _log(f"[SCHED][GUARD] write fail: {_fmt_exc(e)}")
+
+
+def _fire_guard_recent(slot_dt: datetime) -> bool:
+    guard_sec = max(60, int(SNAP_SCHED_FIRE_GUARD_SEC))
+    key = _slot_fire_guard_key(slot_dt)
+    obj = _read_fire_guard()
+    last_key = str(obj.get("slot_key", "") or "")
+    last_ts = float(obj.get("ts", 0.0) or 0.0)
+    age = time.time() - last_ts if last_ts > 0 else 999999.0
+
+    if last_key == key and age < guard_sec:
+        _log(f"[SCHED][GUARD] recent fire key={key} age_sec={age:.1f} guard_sec={guard_sec} -> skip")
+        return True
+    return False
+
+
+def _mark_fire_guard(slot_dt: datetime, mode: str) -> None:
+    key = _slot_fire_guard_key(slot_dt)
+    _write_fire_guard(
+        {
+            "slot_key": key,
+            "slot": slot_dt.astimezone(KST).isoformat(),
+            "ts": time.time(),
+            "created_at": datetime.now(tz=KST).isoformat(),
+            "mode": mode,
+            "pid": os.getpid(),
+            "host": os.environ.get("COMPUTERNAME", "") or os.environ.get("HOSTNAME", ""),
+        }
+    )
+    _log(f"[SCHED][GUARD] marked key={key} mode={mode}")
 
 
 # =============================================================================
@@ -1051,6 +1113,7 @@ def _wait_data_ready(page, timeout_ms: int) -> None:
     last_log = 0.0
     stable_ok_since: Optional[float] = None
     stable_need_sec = 2.0
+    last_state = ""
 
     while time.time() < deadline:
         try:
@@ -1073,6 +1136,8 @@ def _wait_data_ready(page, timeout_ms: int) -> None:
 
         if hard_ready:
             snap_ready_seen = True
+        if marker_ready:
+            snap_ready_seen = True
 
         hit_block = ""
         for t in block_texts:
@@ -1084,11 +1149,12 @@ def _wait_data_ready(page, timeout_ms: int) -> None:
         if must_texts:
             must_ok = any((t in body) for t in must_texts if t)
 
+        # marker_ready is the Streamlit-rendered source of truth. hard_ready is
+        # only an iframe JS helper and can be late/missing in frozen builds.
         ready_now = bool(
-            hard_ready
-            and marker_ready
+            marker_ready
             and visual_ready
-            and (sc <= 0)
+            and (sc <= 1)
             and (not hit_block)
             and must_ok
         )
@@ -1107,15 +1173,20 @@ def _wait_data_ready(page, timeout_ms: int) -> None:
 
         if time.time() - last_log >= 5.0:
             last_log = time.time()
-            _log(
-                f"[DATA] waiting hard_ready={hard_ready} marker_ready={marker_ready} "
+            last_state = (
+                f"hard_ready={hard_ready} marker_ready={marker_ready} "
                 f"visual_ready={visual_ready} spinner={sc} "
                 f"block={hit_block[:30] if hit_block else ''} must_ok={must_ok} "
                 f"snap_ready_seen={snap_ready_seen}"
             )
+            _log(
+                f"[DATA] waiting {last_state}"
+            )
 
         time.sleep(0.35)
 
+    if last_state:
+        _log(f"[DATA] timeout last_state {last_state}")
     raise TimeoutError("DATA ready timeout (snap marker / visual sections / spinner / block text)")
 
 
@@ -1911,8 +1982,12 @@ def _catchup_fire_if_needed(times: List[Tuple[int, int, int]]) -> None:
                 _log(f"[SCHED][CATCHUP] slot={slot} within grace but already sent -> skip")
                 _write_status("idle", note="catchup_skip_already_sent", slot=slot.isoformat())
                 return
+            if _fire_guard_recent(slot):
+                _write_status("idle", note="catchup_skip_fire_guard", slot=slot.isoformat())
+                return
             _log(f"[SCHED][CATCHUP] FIRE slot={slot.strftime('%Y-%m-%d %H:%M:%S %Z')} delta={delta:.1f}s")
             _write_status("firing", slot=slot.isoformat(), mode="catchup")
+            _mark_fire_guard(slot, mode="catchup")
             try:
                 _fire_slot(slot)
             except Exception as e:
@@ -1987,9 +2062,15 @@ def _scheduler_loop() -> None:
                     _write_status("idle", note="already_sent", slot=slot.isoformat())
                     continue
 
+                if _fire_guard_recent(slot):
+                    last_fired_key = fire_key
+                    _write_status("idle", note="fire_guard", slot=slot.isoformat())
+                    continue
+
                 last_fired_key = fire_key
                 _log(f"[SCHED] FIRE slot={slot.strftime('%Y-%m-%d %H:%M:%S %Z')} (delta=+{delta:.2f}s)")
                 _write_status("firing", slot=slot.isoformat(), mode="schedule")
+                _mark_fire_guard(slot, mode="schedule")
 
                 try:
                     _fire_slot(slot)

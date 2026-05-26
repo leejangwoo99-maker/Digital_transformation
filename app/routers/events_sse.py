@@ -65,7 +65,7 @@ ENGINE: Engine = _SHARED or create_engine(
 router = APIRouter(prefix="/events", tags=["events-sse"])
 
 KST = ZoneInfo("Asia/Seoul")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "leejangwoo1!")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "")  #비번
 
 ALLOWED_SECTIONS = {
     "alarm",

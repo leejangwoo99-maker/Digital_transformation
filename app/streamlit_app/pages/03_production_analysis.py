@@ -25,6 +25,25 @@ KST = ZoneInfo("Asia/Seoul")
 
 ALARM_ALLOWED_TYPES = {"권고", "긴급", "교체"}
 STATION_ORDER = ["FCT1", "FCT2", "FCT3", "FCT4", "Vision1", "Vision2"]
+def _env_int(name: str, default: int, min_v: int, max_v: int) -> int:
+    raw = os.getenv(name, "")
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        v = int(float(s))
+    except Exception:
+        return default
+    if v < min_v:
+        return min_v
+    if v > max_v:
+        return max_v
+    return v
+
+
+SNAP_READY_TIMEOUT_MS = _env_int("SNAP_TIMEOUT_MS", default=180000, min_v=30000, max_v=1200000)
 
 
 # -----------------------------
@@ -577,7 +596,7 @@ def _snap_mark_ready():
           }
 
           async function pollReady() {
-            const deadline = Date.now() + 180000;
+            const deadline = Date.now() + __SNAP_READY_TIMEOUT_MS__;
 
             while (Date.now() < deadline) {
               if (isDataReady()) {
@@ -595,7 +614,7 @@ def _snap_mark_ready():
           pollReady();
         })();
         </script>
-        """,
+        """.replace("__SNAP_READY_TIMEOUT_MS__", str(int(SNAP_READY_TIMEOUT_MS))),
         height=0,
     )
 

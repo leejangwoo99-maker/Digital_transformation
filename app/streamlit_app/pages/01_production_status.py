@@ -303,6 +303,7 @@ SECTIONS_LATEST_TIMEOUT = _env_float("ST_SECTIONS_LATEST_TIMEOUT", default=8.0, 
 NONOP_WINDOW_TIMEOUT = _env_float("ST_NONOP_WINDOW_TIMEOUT", default=8.0, min_v=1.0, max_v=30.0)
 NONOP_CHANGES_TIMEOUT = _env_float("ST_NONOP_CHANGES_TIMEOUT", default=4.0, min_v=1.0, max_v=30.0)
 NONOP_UPDATE_TIMEOUT = _env_float("ST_NONOP_UPDATE_TIMEOUT", default=10.0, min_v=1.0, max_v=60.0)
+SNAP_READY_TIMEOUT_MS = _env_int("SNAP_TIMEOUT_MS", default=180000, min_v=30000, max_v=1200000)
 
 NONOP_EDIT_LOCK_SEC = 5.0
 NONOP_LOCK_STUCK_SEC = 60.0
@@ -1497,6 +1498,13 @@ def _nonop_spare_state_key(end_day: str, shift: str, row_uid: str) -> str:
     return f"nonop_spare_{end_day}_{shift}_{row_uid}"
 
 
+def _nonop_change_identity(row: Dict[str, Any]) -> str:
+    rid = str(row.get("id", "") or "").strip()
+    if rid:
+        return f"id::{rid}"
+    return f"key::{nonop_key(row)}"
+
+
 def nonop_sort_ts(prod_day: str, shift: str, row: Dict[str, Any], win_start: datetime) -> float:
     ft = parse_any_ts(win_start, row.get("from_ts", row.get("from_time")))
     if ft is None:
@@ -1569,42 +1577,50 @@ def _merge_nonop_changes(prod_day: str, shift: str, changes: List[Dict[str, Any]
 
     idx_map: Dict[str, int] = {}
     for i, r in enumerate(buf):
-        idx_map[nonop_key(r)] = i
+        idx_map[_nonop_change_identity(r)] = i
 
     for r in changes:
-        k = nonop_key(r)
+        k = _nonop_change_identity(r)
         if k in idx_map:
             buf[idx_map[k]].update(r)
         else:
             keyset.add(k)
             buf.insert(0, r)
+            idx_map[k] = 0
+            for kk in list(idx_map.keys()):
+                if kk != k:
+                    idx_map[kk] = int(idx_map[kk]) + 1
 
     win_start, _ = get_scope_window(prod_day, shift)
     buf.sort(key=lambda rr: nonop_sort_ts(prod_day, shift, rr, win_start), reverse=True)
+    dedup_buf: List[Dict[str, Any]] = []
+    seen_buf: set[str] = set()
+    for rr in buf:
+        kk = _nonop_change_identity(rr)
+        if kk in seen_buf:
+            continue
+        seen_buf.add(kk)
+        dedup_buf.append(rr)
+    buf = dedup_buf
     if len(buf) > NONOP_MAX_BUFFER:
         buf = buf[:NONOP_MAX_BUFFER]
 
     st.session_state.nonop_all_buf = buf
-    st.session_state.nonop_all_keyset = keyset
+    st.session_state.nonop_all_keyset = seen_buf
     st.session_state.nonop_loaded_once = True
 
     chart_rows: List[Dict[str, Any]] = st.session_state.get("nonop_chart_rows", []) or []
-    cidx: Dict[int, int] = {}
+    cidx: Dict[str, int] = {}
     for i, r in enumerate(chart_rows):
-        try:
-            cidx[int(r.get("id") or 0)] = i
-        except Exception:
-            pass
+        cidx[_nonop_change_identity(r)] = i
 
     for r in changes:
-        try:
-            rid = int(r.get("id") or 0)
-        except Exception:
-            rid = 0
-        if rid > 0 and rid in cidx:
-            chart_rows[cidx[rid]].update(r)
+        ck = _nonop_change_identity(r)
+        if ck in cidx:
+            chart_rows[cidx[ck]].update(r)
         else:
             chart_rows.append(r)
+            cidx[ck] = len(chart_rows) - 1
 
     win_start, _ = get_scope_window(prod_day, shift)
 
@@ -1613,6 +1629,15 @@ def _merge_nonop_changes(prod_day: str, shift: str, changes: List[Dict[str, Any]
         return dt.timestamp() if dt else 0.0
 
     chart_rows.sort(key=_chart_sort_key)
+    dedup_chart_rows: List[Dict[str, Any]] = []
+    seen_chart: set[str] = set()
+    for rr in chart_rows:
+        ck = _nonop_change_identity(rr)
+        if ck in seen_chart:
+            continue
+        seen_chart.add(ck)
+        dedup_chart_rows.append(rr)
+    chart_rows = dedup_chart_rows
     st.session_state.nonop_chart_rows = chart_rows
     st.session_state.nonop_chart_loaded_once = True
     st.session_state.nonop_render_rev = int(st.session_state.get("nonop_render_rev", 0) or 0) + 1
@@ -1669,7 +1694,7 @@ def _nonop_load_window_once(prod_day: str, shift: str) -> Dict[str, Any]:
         keyset = set()
         buf = []
         for r in items2:
-            k = nonop_key(r)
+            k = _nonop_change_identity(r)
             if k in keyset:
                 continue
             keyset.add(k)
@@ -2055,8 +2080,12 @@ def frag_nonop_table(end_day: str, shift: str):
     nonop_view_rows = (st.session_state.get("nonop_all_buf", []) or [])[: int(st.session_state.nonop_view_limit)]
 
     prepared_rows: List[Dict[str, Any]] = []
+    row_uid_counts: Dict[str, int] = {}
     for src_row in nonop_view_rows:
-        row_uid = _nonop_row_uid(src_row)
+        base_row_uid = _nonop_row_uid(src_row)
+        row_uid_idx = int(row_uid_counts.get(base_row_uid, 0) or 0)
+        row_uid_counts[base_row_uid] = row_uid_idx + 1
+        row_uid = base_row_uid if row_uid_idx == 0 else f"{base_row_uid}__dup{row_uid_idx}"
 
         prod_day_v = normalize_day_yyyymmdd(src_row.get("prod_day", src_row.get("end_day", ""))) or end_day
         station_v = str(src_row.get("station", "") or "").strip()
@@ -2587,6 +2616,54 @@ def frag_master_manual(end_day: str, shift: str):
         mdf = mdf.head(2)
     safe_show_df(mdf, raw_df=mdf, use_container_width=True, hide_index=True)
 
+
+
+@_frag_deco(NONOP_EVERY_SEC)
+def frag_nonop_all_data(end_day: str, shift: str):
+    st.subheader("비가동 상세 전체 데이터")
+
+    if is_any_modal_open():
+        st.info("모달 편집 중에는 자동 갱신을 잠시 멈춥니다.")
+        return
+
+    _nonop_reset_if_needed(end_day, shift)
+    _nonop_load_window_once(end_day, shift)
+
+    rows = st.session_state.get("nonop_chart_rows", []) or []
+    if not rows:
+        st.caption("표시할 비가동 상세 데이터가 없습니다.")
+        return
+
+    win_start, _ = get_scope_window(end_day, shift)
+
+    view_rows: List[Dict[str, Any]] = []
+    for r in rows:
+        rr = r or {}
+        view_rows.append(
+            {
+                "id": rr.get("id", ""),
+                "prod_day": normalize_day_yyyymmdd(rr.get("prod_day", rr.get("end_day", ""))) or end_day,
+                "shift_type": str(rr.get("shift_type", shift) or shift),
+                "station": str(rr.get("station", "") or ""),
+                "from_ts": fmt_hms(rr.get("from_ts", rr.get("from_time", ""))),
+                "to_ts": fmt_hms(rr.get("to_ts", rr.get("to_time", ""))),
+                "reason": "" if rr.get("reason") is None else str(rr.get("reason") or ""),
+                "sparepart": "" if rr.get("sparepart") is None else str(rr.get("sparepart") or ""),
+                "updated_at": str(rr.get("updated_at", "") or ""),
+                "_sort_ts": nonop_sort_ts(end_day, shift, rr, win_start),
+            }
+        )
+
+    df = pd.DataFrame(view_rows)
+    df = df.sort_values("_sort_ts", ascending=False).drop(columns=["_sort_ts"], errors="ignore")
+
+    safe_show_df(
+        df,
+        raw_df=df,
+        use_container_width=True,
+        hide_index=True,
+        height=NONOP_TABLE_HEIGHT,
+    )
 
 def render_header_buttons(end_day: str, shift: str, snap_mode: bool = False):
     b1, b2, b3, b4, b5 = st.columns([1, 1, 1, 1, 1.25])
@@ -3134,8 +3211,9 @@ def _snap_data_ready_state(end_day: str, shift: str) -> Dict[str, Any]:
     chart_rev_ok = (chart_render_rev_done >= expected_rev)
     chart_count_ok = (chart_nonop_count_done == row_count)
 
-    # 렌더 직후 즉시 캡처 방지용 최소 안정화 시간
-    chart_settled = (chart_render_ts > 0.0) and ((time_mod.time() - chart_render_ts) >= 1.2)
+    # 렌더 후 안정화 대기는 JS/mailer's stable wait에서 처리한다.
+    # 여기서 시간 경과를 요구하면 Streamlit rerun이 없는 경우 marker가 갱신되지 않아 간헐 timeout이 난다.
+    chart_settled = chart_render_ts > 0.0
 
     # 비가동이 0건이면 0건 차트도 정상
     # 비가동이 1건 이상이면 차트 rows도 동일 건수까지 반영돼야 정상
@@ -3250,7 +3328,7 @@ def _snap_mark_ready():
           }
 
           async function pollReady() {
-            const deadline = Date.now() + 180000;
+            const deadline = Date.now() + __SNAP_READY_TIMEOUT_MS__;
 
             while (Date.now() < deadline) {
               if (isDataReady()) {
@@ -3268,7 +3346,7 @@ def _snap_mark_ready():
           pollReady();
         })();
         </script>
-        """,
+        """.replace("__SNAP_READY_TIMEOUT_MS__", str(int(SNAP_READY_TIMEOUT_MS))),
         height=0,
     )
 
@@ -3277,15 +3355,6 @@ safe_set_page_config(page_title="실시간 Dash board", layout="wide")
 inject_no_dim_fade_keep_loading()
 
 SNAP = _is_snap()
-
-if (not SNAP) and ("snapshot_scheduler_started" not in st.session_state):
-    try:
-        from app import start_snapshot_scheduler_once
-        start_snapshot_scheduler_once()
-        st.session_state["snapshot_scheduler_started"] = True
-    except Exception as e:
-        st.session_state["snapshot_scheduler_started"] = False
-        st.session_state["snapshot_scheduler_start_error"] = str(e)
 
 if "seen_alarm_pks" not in st.session_state:
     st.session_state.seen_alarm_pks = set()
@@ -3445,6 +3514,9 @@ with c1:
 with c2:
     frag_master_manual(end_day, shift)
 
+st.divider()
+frag_nonop_all_data(end_day, shift)
+
 with st.expander("PERF LOG (최근)", expanded=False):
     logs = st.session_state.get("perf_logs", []) or []
     if logs:
@@ -3457,3 +3529,4 @@ if SNAP:
     _render_snap_ready_marker(end_day, shift)
 
 _snap_mark_ready()
+

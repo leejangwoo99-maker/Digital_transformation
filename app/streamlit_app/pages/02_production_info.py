@@ -53,6 +53,7 @@ def _env_int(name: str, default: int, min_v: int, max_v: int) -> int:
 
 
 P02_FETCH_WORKERS = _env_int("P02_FETCH_WORKERS", default=8, min_v=2, max_v=32)
+SNAP_READY_TIMEOUT_MS = _env_int("SNAP_TIMEOUT_MS", default=180000, min_v=30000, max_v=1200000)
 
 
 # -----------------------------
@@ -923,7 +924,7 @@ def _snap_mark_ready():
           }
 
           async function pollReady() {
-            const deadline = Date.now() + 180000;
+            const deadline = Date.now() + __SNAP_READY_TIMEOUT_MS__;
 
             while (Date.now() < deadline) {
               if (isDataReady()) {
@@ -941,7 +942,7 @@ def _snap_mark_ready():
           pollReady();
         })();
         </script>
-        """,
+        """.replace("__SNAP_READY_TIMEOUT_MS__", str(int(SNAP_READY_TIMEOUT_MS))),
         height=0,
     )
 
