@@ -21,6 +21,6 @@ FYI, demon & back-end & streamlit are compiled by Nuitka.
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   - Facial recognition
 
-1. Please refer the release section and download .exe file and maunal.
+1. It can recognize the human's face what saeved.
 2. It is based on C#.NET.
-3. It can recognize the human's face what saeved.
+3. Please refer the release section and download .exe file and maunal.
