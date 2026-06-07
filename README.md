@@ -27,6 +27,6 @@ FYI, demon & back-end & streamlit are compiled by Nuitka.
 1. It can recognize the human's face what saeved.
   사람의 얼굴을 인식하여 저장할 수 있습니다.
 2. It is based on C#.NET.
-  C#.NET 기반입니다.
+    C#.NET 기반입니다.
 3. Please refer the release section and download .exe file, maunal and source code.
-  릴리스 섹션을 참조하여 .exe 파일, 설명서 및 소스 코드를 다운로드하십시오.
+   릴리스 섹션을 참조하여 .exe 파일, 설명서 및 소스 코드를 다운로드하십시오.
