@@ -20,6 +20,7 @@ FYI, demon & back-end & streamlit are compiled by Nuitka.
 7. Recommend relearning algorithm once a year at the time of the inventory count, if use the data for 6months, it will take 6days to finish learning algorithm.
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   - Facial recognition
+
 Please refer the release section and download .exe file and maunal.
 It is based on C#.NET.
 It can recognize the human's face what saeved.
