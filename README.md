@@ -1,5 +1,5 @@
 - Dashboard -
-1. The preprocessed data was stored in a DB server, then mined for machine learning training, and finally visualized using Streamlit.
+1. The preprocessed data was stored in a DB server, then mined for machine learning training, and finally visualized using C#.NET.
 
 2. According to 사양서 & Architecture, the characteristics of the files are indicated.
 
@@ -8,8 +8,9 @@
 4. Applied Machine learning algorithms are Euclidean Distance, Cosine Similarity and LightGBM.
 
 5. C#_Dashboard folder is the Front-end GUI, FYI, 'app' folder is FastAPI Framework + Streamlit.
+   According to the environment, choose one between them.
 
-6. If want to know the details, search for the details from the link below.
+7. If want to know the details, search for the details from the link below.
    https://serious-ambert-bc0.notion.site/APTIV-31d8bc55235b80f58ecff4b949efdbdf?source=copy_link
 
 FYI, demon & back-end & streamlit are compiled by Nuitka.
@@ -19,4 +20,5 @@ FYI, demon & back-end & streamlit are compiled by Nuitka.
 
 - Facial recognition -
 Please refer the release section and download .exe file and maunal.
+It is based on C#.NET.
 It can recognize the human's face what saeved.
