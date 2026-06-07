@@ -1,4 +1,5 @@
-# Dashboard
+# Digital transformation
+  - Dash board -
 
 1. The preprocessed data was stored in a DB server, then mined for machine learning training, and finally visualized using C#.NET.
 
@@ -18,7 +19,7 @@ FYI, demon & back-end & streamlit are compiled by Nuitka.
 
 7. Recommend relearning algorithm once a year at the time of the inventory count, if use the data for 6months, it will take 6days to finish learning algorithm.
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Facial recognition
+  - Facial recognition -
 
 Please refer the release section and download .exe file and maunal.
 It is based on C#.NET.
