@@ -14,11 +14,11 @@
 > C#_Dashboard 폴더는 프런트엔드 GUI이며, 'app' 폴더는 FastAPI 프레임워크와 Streamlit을 사용합니다.
 > 환경에 따라 둘 중 하나를 선택하십시오.
 6. If want to know the related documents, search for the details from the link below.
-> 관련 서류는 아래 링크에서 확인하십시오.  
+> 관련 서류는 아래 링크에서 확인하십시오.
 > https://serious-ambert-bc0.notion.site/APTIV-31d8bc55235b80f58ecff4b949efdbdf?source=copy_link
-FYI, demon & back-end & streamlit are compiled by Nuitka.
-> 참고로, demon, back-end, streamlit은 Nuitka로 컴파일되었습니다.
-7. Recommend relearning algorithm once a year at the time of the inventory count, if use the data for 6months, it will take 6days to finish learning algorithm.
+7. FYI, demon & back-end & streamlit are compiled by Nuitka, please refer Nuitka folder.
+> 참고로, demon, back-end, streamlit은 Nuitka로 컴파일되었습니다. Nuitka 폴더를 참고하세요.
+8. Recommend relearning algorithm once a year at the time of the inventory count, if use the data for 6months, it will take 6days to finish learning algorithm.
 > 재고 조사 시점에 맞춰 연 1회 알고리즘 재학습을 권장합니다. 6개월치 데이터를 사용할 경우, 학습 완료에 6일이 소요됩니다.
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   - Facial recognition
