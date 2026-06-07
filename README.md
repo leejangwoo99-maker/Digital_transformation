@@ -1,4 +1,4 @@
-＃Dashboard
+# Dashboard
 
 1. The preprocessed data was stored in a DB server, then mined for machine learning training, and finally visualized using C#.NET.
 
