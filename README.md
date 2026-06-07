@@ -1,3 +1,4 @@
+- Dashboard -
 1. The preprocessed data was stored in a DB server, then mined for machine learning training, and finally visualized using Streamlit.
 
 2. According to 사양서 & Architecture, the characteristics of the files are indicated.
@@ -14,3 +15,8 @@
 FYI, demon & back-end & streamlit are compiled by Nuitka.
 
 7. Recommend relearning algorithm once a year at the time of the inventory count, if use the data for 6months, it will take 6days to finish learning algorithm.
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+- Facial recognition -
+Please refer the release section and download .exe file and maunal.
+It can recognize the human's face what saeved.
