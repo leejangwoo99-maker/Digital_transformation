@@ -29,3 +29,12 @@
 > C#.NET 기반입니다.
 3. Please refer the release section and download .exe file, maunal and source code.
 > 릴리스 섹션을 참조하여 .exe 파일, 설명서 및 소스 코드를 다운로드하십시오.
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ - vision_inspection
+
+1. It can inspect the product's defects what saeved in real time.
+> 저장한 제품의 결함을 실시간으로 검출할 수 있습니다.
+2. When use real time inspection, It uses the camera of the phone through IP Webcam(application)
+> 실시간 검사를 사용 시 카메라는 IP Webcam이라는 어플을 통해 휴대폰의 카메라를 사용합니다.
+3. Please refer vision_inspection_project folder includeing maunal and source code, excute the main.py.
+> vision_inspection_project 폴더에 메뉴얼과 소스코드를 참고하고 main.py를 실행하세요.
