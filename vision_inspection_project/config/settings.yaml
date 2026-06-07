@@ -1,0 +1,49 @@
+camera:
+  index: 1
+  width: 1280
+  height: 720
+  fps: 30
+  backend: dshow
+  fourcc: MJPG
+  brightness: 128
+  contrast: 128
+  sharpness: 128
+
+capture:
+  video_dir: captures/videos
+
+extract:
+  frame_dir: captures/frames
+  auto_after_recording: true
+  auto_split: train
+  every_n_frames: 10
+  jpeg_quality: 95
+
+model:
+  weights: weights/best.pt
+  confidence: 0.10
+  iou: 0.45
+  image_size: 640
+
+train:
+  data: dataset/data.yaml
+  base_model: yolov8n.pt
+  epochs: 50
+  batch: 8
+  device: cpu
+  project: runs/train
+  name: product_inspection
+  copy_best_to_weights: true
+
+judge:
+  ng_classes:
+    - defect
+    - ng
+    - scratch
+    - dent
+  min_confidence: 0.10
+  no_detection_judge: OK
+
+save:
+  image_dir: database/results
+  csv_path: database/results/inspection_results.csv

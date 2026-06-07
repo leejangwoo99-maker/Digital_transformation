@@ -1,0 +1,4 @@
+opencv-python>=4.9.0
+pillow>=10.0.0
+pyyaml>=6.0.1
+ultralytics>=8.2.0

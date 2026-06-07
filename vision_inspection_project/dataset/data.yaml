@@ -1,0 +1,14 @@
+path: C:/Users/user/PycharmProjects/PythonProject/vision_inspection_project/dataset
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: ok
+  1: defect
+  2: scratch
+  3: dent
+  4: anchor_1
+  5: anchor_2
+  6: roi
+  7: exclude
