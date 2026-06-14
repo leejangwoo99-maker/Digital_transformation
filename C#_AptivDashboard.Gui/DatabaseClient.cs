@@ -517,7 +517,7 @@ internal sealed class DatabaseClient
         {
             var from = CombinePlannedDateTime(day, Clean(row["from_time"]));
             var to = CombinePlannedDateTime(day, Clean(row["to_time"]));
-            if (to <= from)
+            if (to < from)
             {
                 to = to.AddDays(1);
             }

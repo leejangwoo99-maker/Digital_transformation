@@ -414,7 +414,7 @@ internal sealed class DashboardReportSender
         {
             var from = CombineTime(start, Convert.ToString(row["from_time"]));
             var to = CombineTime(start, Convert.ToString(row["to_time"]));
-            if (to <= from)
+            if (to < from)
             {
                 to = to.AddDays(1);
             }
@@ -432,7 +432,7 @@ internal sealed class DashboardReportSender
             }
             if (TryParseDateTime(row["from_ts"], start, out var from) && TryParseDateTime(row["to_ts"], start, out var to))
             {
-                if (to <= from)
+                if (to < from)
                 {
                     to = to.AddDays(1);
                 }
