@@ -4,7 +4,7 @@ namespace AptivDashboard.Gui;
 
 internal sealed class NonOperationChart : Control
 {
-    private readonly string[] _stations = ["FCT1", "FCT2", "FCT3", "FCT4", "Vision1", "Vision2"];
+    private readonly string[] _stations = ["FCT1", "FCT2", "Vision1", "FCT3", "FCT4", "Vision2"];
     private DataTable? _nonOperation;
     private DataTable? _planned;
     private DashboardScope? _scope;

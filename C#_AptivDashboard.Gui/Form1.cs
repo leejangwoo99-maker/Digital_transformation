@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 
 namespace AptivDashboard.Gui;
 
@@ -742,6 +742,24 @@ public partial class Form1 : Form
         var db = NewDatabaseClient();
         var original = await db.GetEmailListAsync();
         using var form = new EditTableForm("Email list", original);
+        var keepEmailPopupOpen = true;
+        if (keepEmailPopupOpen)
+        {
+            form.SaveAsync = async edited =>
+            {
+                if (!ConfirmEditPassword("Email list 저장"))
+                {
+                    return false;
+                }
+                await db.SaveEmailListAsync(original, edited);
+                original = await db.GetEmailListAsync();
+                form.SetSource(original);
+                await RefreshSelectedTabAsync();
+                return true;
+            };
+            form.ShowDialog(this);
+            return;
+        }
         if (form.ShowDialog(this) == DialogResult.OK)
         {
             if (!ConfirmEditPassword("Email list 저장"))
@@ -758,6 +776,24 @@ public partial class Form1 : Form
         var db = NewDatabaseClient();
         var original = await db.GetRemarkInfoAsync();
         using var form = new EditTableForm("Barcode", original, "※ 전체 바코드에 18번째 문자를 넣을 것");
+        var keepBarcodePopupOpen = true;
+        if (keepBarcodePopupOpen)
+        {
+            form.SaveAsync = async edited =>
+            {
+                if (!ConfirmEditPassword("Barcode 저장"))
+                {
+                    return false;
+                }
+                await db.SaveRemarkInfoAsync(original, edited);
+                original = await db.GetRemarkInfoAsync();
+                form.SetSource(original);
+                await RefreshSelectedTabAsync();
+                return true;
+            };
+            form.ShowDialog(this);
+            return;
+        }
         if (form.ShowDialog(this) == DialogResult.OK)
         {
             if (!ConfirmEditPassword("Barcode 저장"))
@@ -784,6 +820,23 @@ public partial class Form1 : Form
             {
                 ["end_day"] = scope.ProdDay.Insert(6, "-").Insert(4, "-"),
             }, timeOptions: BuildPlannedTimeOptions(scope.ShiftType));
+            var keepPlannedPopupOpen = true;
+            if (keepPlannedPopupOpen)
+            {
+                form.SaveAsync = async edited =>
+                {
+                    await db.SavePlannedTimeAsync(original, edited);
+                    original = await db.GetPlannedTimeAsync(scope.ProdDay, scope.ShiftType);
+                    var refreshed = original.Copy();
+                    MakeTableEditable(refreshed);
+                    EnsurePlannedEditRows(refreshed, scope.ProdDay, 4);
+                    form.SetSource(refreshed);
+                    await RefreshSelectedTabAsync();
+                    return true;
+                };
+                form.ShowDialog(this);
+                return;
+            }
             if (form.ShowDialog(this) == DialogResult.OK)
             {
                 await db.SavePlannedTimeAsync(original, form.EditedTable);

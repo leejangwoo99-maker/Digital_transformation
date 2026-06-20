@@ -12,7 +12,11 @@ internal sealed class EditTableForm : Form
     private readonly IReadOnlyDictionary<string, object?> _defaultValues;
     private readonly IReadOnlyList<string>? _timeOptions;
 
-    public DataTable EditedTable { get; }
+    public DataTable EditedTable { get; private set; }
+
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Func<DataTable, Task<bool>>? SaveAsync { get; set; }
 
     public EditTableForm(
         string title,
@@ -28,11 +32,7 @@ internal sealed class EditTableForm : Form
         _defaultValues = defaultValues ?? new Dictionary<string, object?>();
         _timeOptions = timeOptions;
 
-        EditedTable = source.Copy();
-        foreach (DataColumn column in EditedTable.Columns)
-        {
-            column.ReadOnly = false;
-        }
+        EditedTable = MakeEditableCopy(source);
 
         var root = new TableLayoutPanel
         {
@@ -94,14 +94,24 @@ internal sealed class EditTableForm : Form
 
         _saveButton.Text = "저장";
         _saveButton.Width = 84;
-        _saveButton.DialogResult = DialogResult.OK;
-        _saveButton.Click += (_, _) =>
+        _saveButton.Click += async (_, _) =>
         {
-            _grid.EndEdit();
-            var bindingContext = BindingContext;
-            if (bindingContext is not null && bindingContext[EditedTable] is CurrencyManager manager)
+            EndGridEdit();
+            if (SaveAsync is null)
             {
-                manager.EndCurrentEdit();
+                DialogResult = DialogResult.OK;
+                Close();
+                return;
+            }
+
+            _saveButton.Enabled = false;
+            try
+            {
+                await SaveAsync(EditedTable);
+            }
+            finally
+            {
+                _saveButton.Enabled = true;
             }
         };
 
@@ -122,6 +132,31 @@ internal sealed class EditTableForm : Form
         AcceptButton = _saveButton;
         CancelButton = _cancelButton;
         Controls.Add(root);
+    }
+
+    public void SetSource(DataTable source)
+    {
+        EditedTable = MakeEditableCopy(source);
+        _grid.DataSource = EditedTable;
+    }
+
+    private void EndGridEdit()
+    {
+        _grid.EndEdit();
+        if (BindingContext is not null && BindingContext[EditedTable] is CurrencyManager manager)
+        {
+            manager.EndCurrentEdit();
+        }
+    }
+
+    private static DataTable MakeEditableCopy(DataTable source)
+    {
+        var table = source.Copy();
+        foreach (DataColumn column in table.Columns)
+        {
+            column.ReadOnly = false;
+        }
+        return table;
     }
 
     private void ConfigureColumns()

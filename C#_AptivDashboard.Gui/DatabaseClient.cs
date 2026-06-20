@@ -131,10 +131,13 @@ internal sealed class DatabaseClient
     public async Task<DataTable> GetRemarkInfoAsync(CancellationToken cancellationToken = default)
     {
         const string sql = """
-            SELECT lower(btrim(barcode_information)) AS barcode_information, pn, remark
+            SELECT DISTINCT ON (lower(btrim(barcode_information)))
+                lower(btrim(barcode_information)) AS barcode_information,
+                pn,
+                remark
             FROM g_production_film.remark_info
             WHERE barcode_information IS NOT NULL AND btrim(barcode_information) <> ''
-            ORDER BY lower(btrim(barcode_information))
+            ORDER BY lower(btrim(barcode_information)), ctid DESC
             """;
 
         await using var connection = await OpenAsync(cancellationToken);
@@ -282,7 +285,7 @@ internal sealed class DatabaseClient
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         var oldKeys = RowSet(original, "barcode_information");
-        var newRows = edited.Rows.Cast<DataRow>()
+        var newRows = ActiveRows(edited)
             .Select(r => new
             {
                 Barcode = Clean(r["barcode_information"]),
@@ -295,21 +298,19 @@ internal sealed class DatabaseClient
             .ToList();
         var newKeys = newRows.Select(r => r.Barcode).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var barcode in oldKeys.Except(newKeys))
+        foreach (var barcode in oldKeys.Union(newKeys))
         {
             await ExecuteNonQueryAsync(connection, tx, "DELETE FROM g_production_film.remark_info WHERE lower(btrim(barcode_information)) = @barcode", cancellationToken, ("barcode", barcode));
         }
 
-        const string upsert = """
+        const string insert = """
             INSERT INTO g_production_film.remark_info (barcode_information, pn, remark)
             VALUES (@barcode, @pn, @remark)
-            ON CONFLICT (barcode_information)
-            DO UPDATE SET pn = EXCLUDED.pn, remark = EXCLUDED.remark
             """;
 
         foreach (var row in newRows)
         {
-            await ExecuteNonQueryAsync(connection, tx, upsert, cancellationToken, ("barcode", row.Barcode), ("pn", row.Pn), ("remark", row.Remark));
+            await ExecuteNonQueryAsync(connection, tx, insert, cancellationToken, ("barcode", row.Barcode), ("pn", row.Pn), ("remark", row.Remark));
         }
 
         await tx.CommitAsync(cancellationToken);
@@ -321,7 +322,7 @@ internal sealed class DatabaseClient
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         var oldKeys = PlannedKeys(original);
-        var newRows = edited.Rows.Cast<DataRow>()
+        var newRows = ActiveRows(edited)
             .Select(r => new
             {
                 EndDay = NormalizeDay(Clean(r["end_day"])),
@@ -367,7 +368,7 @@ internal sealed class DatabaseClient
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         var oldKeys = WorkerKeys(original);
-        var newRows = edited.Rows.Cast<DataRow>()
+        var newRows = ActiveRows(edited)
             .Select(r => new
             {
                 EndDay = NormalizeDay(Clean(r["end_day"])),
@@ -694,9 +695,15 @@ internal sealed class DatabaseClient
     private static HashSet<string> RowSet(DataTable table, string column)
     {
         return table.Rows.Cast<DataRow>()
+            .Where(r => r.RowState != DataRowState.Deleted)
             .Select(r => Clean(r[column]).ToLowerInvariant())
             .Where(v => v.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<DataRow> ActiveRows(DataTable table)
+    {
+        return table.Rows.Cast<DataRow>().Where(r => r.RowState != DataRowState.Deleted);
     }
 
     private static HashSet<string> PlannedKeys(DataTable table)

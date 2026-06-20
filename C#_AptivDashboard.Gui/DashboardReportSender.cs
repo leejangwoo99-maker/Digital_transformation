@@ -222,11 +222,16 @@ internal sealed class DashboardReportSender
         }
 
         var width = page.Width.Point - 56;
-        var weights = visibleColumns.Select(ColumnWeight).ToList();
+        var weights = visibleColumns.Select(column => ColumnWeight(column, section.Title)).ToList();
         var totalWeight = weights.Sum();
         var columnWidths = weights.Select(weight => width * weight / totalWeight).ToList();
         var rowFont = visibleColumns.Count > 16 ? new XFont("Malgun Gothic", 5.2, XFontStyleEx.Regular) : visibleColumns.Count > 12 ? new XFont("Malgun Gothic", 6.2, XFontStyleEx.Regular) : font;
         var headFont = visibleColumns.Count > 16 ? new XFont("Malgun Gothic", 5.4, XFontStyleEx.Bold) : visibleColumns.Count > 12 ? new XFont("Malgun Gothic", 6.4, XFontStyleEx.Bold) : headerFont;
+        if (section.Title == "FCT Worst Case")
+        {
+            rowFont = new XFont("Malgun Gothic", 5.6, XFontStyleEx.Regular);
+            headFont = new XFont("Malgun Gothic", 5.8, XFontStyleEx.Bold);
+        }
         if (section.Title == "TEST 합격률")
         {
             rowFont = new XFont("Malgun Gothic", Math.Max(4.8, rowFont.Size - 0.3), XFontStyleEx.Regular);
@@ -284,7 +289,7 @@ internal sealed class DashboardReportSender
         var plotHeight = 220.0;
         var plotLeft = (page.Width.Point - plotWidth) / 2;
         var plot = new XRect(plotLeft, y + 38, plotWidth, plotHeight);
-        var stations = new[] { "FCT1", "FCT2", "FCT3", "FCT4", "Vision1", "Vision2" };
+        var stations = new[] { "FCT1", "FCT2", "Vision1", "FCT3", "FCT4", "Vision2" };
         var run = new XSolidBrush(XColor.FromArgb(136, 211, 182));
         var plan = new XSolidBrush(XColor.FromArgb(246, 231, 167));
         var stop = new XSolidBrush(XColor.FromArgb(244, 180, 180));
@@ -374,9 +379,28 @@ internal sealed class DashboardReportSender
         y = plot.Bottom + 28;
     }
 
-    private static double ColumnWeight(DataColumn column)
+    private static double ColumnWeight(DataColumn column, string sectionTitle)
     {
         var name = column.ColumnName.ToLowerInvariant();
+        if (sectionTitle == "FCT Worst Case")
+        {
+            if (name == "file_path")
+            {
+                return 5.2;
+            }
+            if (name == "test_contents")
+            {
+                return 2.5;
+            }
+            if (name == "barcode_information")
+            {
+                return 2.0;
+            }
+            if (name is "prod_day" or "shift_type" or "end_day" or "end_time" or "run_time" or "station" or "pn" or "remark")
+            {
+                return 0.58;
+            }
+        }
         if (name is "prod_day" or "shift_type" or "end_day")
         {
             return name == "shift_type" ? 0.36 : 0.42;
