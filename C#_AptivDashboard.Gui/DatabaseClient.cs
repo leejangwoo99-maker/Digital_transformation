@@ -132,7 +132,7 @@ internal sealed class DatabaseClient
     {
         const string sql = """
             SELECT DISTINCT ON (lower(btrim(barcode_information)))
-                lower(btrim(barcode_information)) AS barcode_information,
+                upper(btrim(barcode_information)) AS barcode_information,
                 pn,
                 remark
             FROM g_production_film.remark_info
@@ -288,7 +288,7 @@ internal sealed class DatabaseClient
         var newRows = ActiveRows(edited)
             .Select(r => new
             {
-                Barcode = Clean(r["barcode_information"]),
+                Barcode = Clean(r["barcode_information"]).ToUpperInvariant(),
                 Pn = Clean(r["pn"]),
                 Remark = Clean(r["remark"]),
             })
@@ -300,7 +300,7 @@ internal sealed class DatabaseClient
 
         foreach (var barcode in oldKeys.Union(newKeys))
         {
-            await ExecuteNonQueryAsync(connection, tx, "DELETE FROM g_production_film.remark_info WHERE lower(btrim(barcode_information)) = @barcode", cancellationToken, ("barcode", barcode));
+            await ExecuteNonQueryAsync(connection, tx, "DELETE FROM g_production_film.remark_info WHERE lower(btrim(barcode_information)) = @barcode", cancellationToken, ("barcode", barcode.ToLowerInvariant()));
         }
 
         const string insert = """

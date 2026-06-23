@@ -206,7 +206,7 @@ public partial class Form1 : Form
             Padding = new Padding(6, 0, 0, 0),
         };
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 480));
+        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 138));
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
