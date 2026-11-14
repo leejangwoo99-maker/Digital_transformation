@@ -1,0 +1,6 @@
+path: C:/Users/user/PycharmProjects/PythonProject/vision_inspection_project/dataset/algorithm_datasets/Proto_23fps_conn_algorith_20261104_132438_718217
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: metal_pin

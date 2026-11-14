@@ -8,7 +8,13 @@ names:
   1: defect
   2: scratch
   3: dent
-  4: anchor_1
-  5: anchor_2
-  6: roi
-  7: exclude
+  4: breakage
+  5: variation
+  6: foreign_object
+  7: auto_exclude
+  8: anchor_1
+  9: anchor_2
+  10: roi
+  11: exclude
+  12: except
+  13: Essential

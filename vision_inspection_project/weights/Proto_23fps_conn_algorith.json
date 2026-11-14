@@ -1,0 +1,16 @@
+{
+  "conn_crop": true,
+  "conn_reflection_augmentation": true,
+  "conn_pin_point": true,
+  "image_size": 640,
+  "task": "obb",
+  "data": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\dataset\\algorithm_datasets\\Proto_23fps_conn_algorith_20261105_115947_033648\\data.yaml",
+  "run_dir": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\runs\\obb\\runs\\train\\Proto_23fps_conn_algorith-3",
+  "metrics": {
+    "metrics/precision(B)": 1.0,
+    "metrics/recall(B)": 0.977991933383131,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.6831666666666666,
+    "fitness": 0.6831666666666666
+  }
+}

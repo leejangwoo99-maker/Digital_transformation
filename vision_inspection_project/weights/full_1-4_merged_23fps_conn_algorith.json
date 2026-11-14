@@ -1,0 +1,16 @@
+{
+  "conn_crop": true,
+  "conn_reflection_augmentation": true,
+  "conn_pin_point": true,
+  "image_size": 640,
+  "task": "obb",
+  "data": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\dataset\\algorithm_datasets\\full_1-4_merged_23fps_conn_algorith_20261027_162528_224637\\data.yaml",
+  "run_dir": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\runs\\obb\\runs\\train\\full_1-4_merged_23fps_conn_algorith",
+  "metrics": {
+    "metrics/precision(B)": 0.9943438842045068,
+    "metrics/recall(B)": 1.0,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.8926250000000001,
+    "fitness": 0.8926250000000001
+  }
+}

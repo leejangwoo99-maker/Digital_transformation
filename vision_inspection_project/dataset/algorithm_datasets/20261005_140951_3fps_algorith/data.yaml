@@ -1,0 +1,18 @@
+path: C:/Users/user/PycharmProjects/PythonProject/vision_inspection_project/dataset/algorithm_datasets/20261005_140951_3fps_algorith
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: ok
+  1: defect
+  2: scratch
+  3: dent
+  4: breakage
+  5: variation
+  6: foreign_object
+  7: auto_exclude
+  8: anchor_1
+  9: anchor_2
+  10: roi
+  11: exclude
+  12: except

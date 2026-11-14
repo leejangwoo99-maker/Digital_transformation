@@ -1,0 +1,6 @@
+path: C:/Users/user/PycharmProjects/PythonProject/vision_inspection_project/dataset/algorithm_datasets/total_conn_algorith_20261005_001820_668497
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: metal_pin

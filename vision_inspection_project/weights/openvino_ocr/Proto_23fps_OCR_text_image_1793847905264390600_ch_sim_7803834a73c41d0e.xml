@@ -1,0 +1,1737 @@
+<?xml version="1.0"?>
+<net name="Model4" version="11">
+	<layers>
+		<layer id="0" name="image" type="Parameter" version="opset1">
+			<data shape="?,1,64,?" element_type="f32" />
+			<output>
+				<port id="0" precision="FP32" names="image">
+					<dim>-1</dim>
+					<dim>1</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="1" name="self.model.FeatureExtraction.ConvNet.0.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="32, 1, 3, 3" offset="0" size="1152" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.FeatureExtraction.ConvNet.0.weight">
+					<dim>32</dim>
+					<dim>1</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="2" name="__module.model.FeatureExtraction.ConvNet.0/aten::_convolution/Convolution" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>1</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>32</dim>
+					<dim>1</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="3" name="__module.model.FeatureExtraction.ConvNet.0/aten::_convolution/Reshape" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 32, 1, 1" offset="1152" size="128" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="4" name="__module.model.FeatureExtraction.ConvNet.0/aten::_convolution/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="48_1">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="5" name="__module.model.FeatureExtraction.ConvNet.1/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="48,input.1">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="6" name="__module.model.FeatureExtraction.ConvNet.2/aten::max_pool2d/MaxPool" type="MaxPool" version="opset14">
+			<data strides="2, 2" dilations="1, 1" pads_begin="0, 0" pads_end="0, 0" kernel="2, 2" rounding_type="floor" auto_pad="explicit" index_element_type="i64" axis="2" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>64</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="54,input.5">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="2" precision="I64">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="7" name="self.model.FeatureExtraction.ConvNet.3.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="64, 32, 3, 3" offset="1280" size="73728" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.FeatureExtraction.ConvNet.3.weight">
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="8" name="__module.model.FeatureExtraction.ConvNet.3/aten::_convolution/Convolution" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>32</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="9" name="__module.model.FeatureExtraction.ConvNet.3/aten::_convolution/Reshape" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 64, 1, 1" offset="75008" size="256" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="10" name="__module.model.FeatureExtraction.ConvNet.3/aten::_convolution/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="61_1">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="11" name="__module.model.FeatureExtraction.ConvNet.4/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="61,input.7">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="12" name="__module.model.FeatureExtraction.ConvNet.5/aten::max_pool2d/MaxPool" type="MaxPool" version="opset14">
+			<data strides="2, 2" dilations="1, 1" pads_begin="0, 0" pads_end="0, 0" kernel="2, 2" rounding_type="floor" auto_pad="explicit" index_element_type="i64" axis="2" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>32</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="67,input.11">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="2" precision="I64">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="13" name="self.model.FeatureExtraction.ConvNet.6.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="128, 64, 3, 3" offset="75264" size="294912" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.FeatureExtraction.ConvNet.6.weight">
+					<dim>128</dim>
+					<dim>64</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="14" name="__module.model.FeatureExtraction.ConvNet.6/aten::_convolution/Convolution" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>64</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="15" name="__module.model.FeatureExtraction.ConvNet.6/aten::_convolution/Reshape" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 128, 1, 1" offset="370176" size="512" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="16" name="__module.model.FeatureExtraction.ConvNet.6/aten::_convolution/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="74_1">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="17" name="__module.model.FeatureExtraction.ConvNet.7/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="74,input.13">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="18" name="self.model.FeatureExtraction.ConvNet.8.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="128, 128, 3, 3" offset="370688" size="589824" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.FeatureExtraction.ConvNet.8.weight">
+					<dim>128</dim>
+					<dim>128</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="19" name="__module.model.FeatureExtraction.ConvNet.8/aten::_convolution/Convolution" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>128</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="20" name="__module.model.FeatureExtraction.ConvNet.8/aten::_convolution/Reshape" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 128, 1, 1" offset="960512" size="512" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="21" name="__module.model.FeatureExtraction.ConvNet.8/aten::_convolution/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="82_1">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="22" name="__module.model.FeatureExtraction.ConvNet.9/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="82,input.17">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="23" name="__module.model.FeatureExtraction.ConvNet.10/aten::max_pool2d/MaxPool" type="MaxPool" version="opset14">
+			<data strides="2, 1" dilations="1, 1" pads_begin="0, 0" pads_end="0, 0" kernel="2, 1" rounding_type="floor" auto_pad="explicit" index_element_type="i64" axis="2" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>16</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="88,input.21">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="2" precision="I64">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="24" name="Multiply_14562" type="Const" version="opset1">
+			<data element_type="f32" shape="256, 128, 3, 3" offset="961024" size="1179648" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>256</dim>
+					<dim>128</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="25" name="Multiply_14546" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>256</dim>
+					<dim>128</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="26" name="Constant_14551" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 256, 1, 1" offset="2140672" size="1024" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="27" name="__module.model.FeatureExtraction.ConvNet.12/aten::batch_norm/BatchNormInference" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="99_1">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="28" name="__module.model.FeatureExtraction.ConvNet.13/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="99,input.25">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="29" name="Multiply_14566" type="Const" version="opset1">
+			<data element_type="f32" shape="256, 256, 3, 3" offset="2141696" size="2359296" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>256</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="30" name="Multiply_14553" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>256</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="31" name="Constant_14558" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 256, 1, 1" offset="4500992" size="1024" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="32" name="__module.model.FeatureExtraction.ConvNet.15/aten::batch_norm/BatchNormInference" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="111_1">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="33" name="__module.model.FeatureExtraction.ConvNet.16/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="111,input.31">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="34" name="__module.model.FeatureExtraction.ConvNet.17/aten::max_pool2d/MaxPool" type="MaxPool" version="opset14">
+			<data strides="2, 1" dilations="1, 1" pads_begin="0, 0" pads_end="0, 0" kernel="2, 1" rounding_type="floor" auto_pad="explicit" index_element_type="i64" axis="2" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>8</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="117,input.35">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>4</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="2" precision="I64">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>4</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="35" name="self.model.FeatureExtraction.ConvNet.18.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="256, 256, 2, 2" offset="4502016" size="1048576" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.FeatureExtraction.ConvNet.18.weight">
+					<dim>256</dim>
+					<dim>256</dim>
+					<dim>2</dim>
+					<dim>2</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="36" name="__module.model.FeatureExtraction.ConvNet.18/aten::_convolution/Convolution" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="0, 0" pads_end="0, 0" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>4</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>256</dim>
+					<dim>256</dim>
+					<dim>2</dim>
+					<dim>2</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="37" name="__module.model.FeatureExtraction.ConvNet.18/aten::_convolution/Reshape" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 256, 1, 1" offset="5550592" size="1024" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="38" name="__module.model.FeatureExtraction.ConvNet.18/aten::_convolution/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="124_1">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="39" name="__module.model.FeatureExtraction.ConvNet.19/aten::relu_/Relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="124,input.37">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="40" name="Constant_11349" type="Const" version="opset1">
+			<data element_type="i64" shape="4" offset="5551616" size="32" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>4</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="41" name="__module.model/aten::permute/Transpose" type="Transpose" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>4</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="127,input.39">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="42" name="__module.model.AdaptiveAvgPool/aten::size/ShapeOf" type="ShapeOf" version="opset3">
+			<data output_type="i64" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="I64">
+					<dim>4</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="43" name="Constant_14824" type="Const" version="opset1">
+			<data element_type="i64" shape="1" offset="5551648" size="8" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="44" name="__module.model.AdaptiveAvgPool/aten::size/Constant" type="Const" version="opset1">
+			<data element_type="i32" shape="" offset="5551656" size="4" />
+			<output>
+				<port id="0" precision="I32" />
+			</output>
+		</layer>
+		<layer id="45" name="__module.model.AdaptiveAvgPool/aten::size/Gather" type="Gather" version="opset8">
+			<data batch_dims="0" />
+			<input>
+				<port id="0" precision="I64">
+					<dim>4</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>1</dim>
+				</port>
+				<port id="2" precision="I32" />
+			</input>
+			<output>
+				<port id="3" precision="I64" names="128">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="46" name="Convert_14676" type="Convert" version="opset1">
+			<data destination_type="i32" />
+			<input>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="I32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="47" name="__module.model.AdaptiveAvgPool/aten::adaptive_avg_pool2d/Unsqueeze_1" type="Const" version="opset1">
+			<data element_type="i32" shape="1" offset="5551660" size="4" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="48" name="__module.model.AdaptiveAvgPool/aten::adaptive_avg_pool2d/Concat" type="Concat" version="opset1">
+			<data axis="0" />
+			<input>
+				<port id="0" precision="I32">
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="I32">
+					<dim>2</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="49" name="__module.model.AdaptiveAvgPool/aten::adaptive_avg_pool2d/AdaptiveAvgPool" type="AdaptiveAvgPool" version="opset8">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>3</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>2</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="50" name="Constant_14718" type="Const" version="opset1">
+			<data element_type="i64" shape="4" offset="5551664" size="32" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>4</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="51" name="__module.model.AdaptiveAvgPool/aten::adaptive_avg_pool2d/Reshape" type="Reshape" version="opset1">
+			<data special_zero="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>4</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="130,visual_feature">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="52" name="8" type="Const" version="opset1">
+			<data element_type="i64" shape="" offset="5551696" size="8" />
+			<output>
+				<port id="0" precision="I64" names="8" />
+			</output>
+		</layer>
+		<layer id="53" name="__module.model/aten::squeeze/Squeeze" type="Squeeze" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="I64" />
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="131,input.41">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="54" name="__module.model.SequenceModeling.0.rnn/aten::zeros/Convert" type="Const" version="opset1">
+			<data element_type="f32" shape="" offset="5551656" size="4" />
+			<output>
+				<port id="0" precision="FP32" />
+			</output>
+		</layer>
+		<layer id="55" name="Constant_11424" type="Const" version="opset1">
+			<data element_type="i64" shape="1" offset="5551648" size="8" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="56" name="Constant_14693" type="Const" version="opset1">
+			<data element_type="i64" shape="1" offset="5551704" size="8" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="57" name="Constant_14694" type="Const" version="opset1">
+			<data element_type="i64" shape="" offset="5551704" size="8" />
+			<output>
+				<port id="0" precision="I64" />
+			</output>
+		</layer>
+		<layer id="58" name="Gather_14695" type="Gather" version="opset8">
+			<data batch_dims="0" />
+			<input>
+				<port id="0" precision="I64">
+					<dim>4</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>1</dim>
+				</port>
+				<port id="2" precision="I64" />
+			</input>
+			<output>
+				<port id="3" precision="I64" names="144,167">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="59" name="Constant_11425" type="Const" version="opset1">
+			<data element_type="i64" shape="1" offset="5551712" size="8" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="60" name="__module.model.SequenceModeling.0.rnn/prim::ListConstruct/SequenceMark" type="Concat" version="opset1">
+			<data axis="0" />
+			<input>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>1</dim>
+				</port>
+				<port id="2" precision="I64">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="3" precision="I64">
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="61" name="__module.model.SequenceModeling.0.rnn/aten::zeros/Broadcast" type="Broadcast" version="opset3">
+			<data mode="numpy" />
+			<input>
+				<port id="0" precision="FP32" />
+				<port id="1" precision="I64">
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="146,148,169,171,hx,hx.1,hx.3,hx.5">
+					<dim>2</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="62" name="Constant_11453" type="Const" version="opset1">
+			<data element_type="i32" shape="3" offset="5551720" size="12" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="63" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Transpose" type="Transpose" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="64" name="__module.model.SequenceModeling.0.rnn/aten::size/ShapeOf" type="ShapeOf" version="opset3">
+			<data output_type="i64" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="I64">
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="65" name="Convert_14700" type="Convert" version="opset1">
+			<data destination_type="i32" />
+			<input>
+				<port id="0" precision="I64">
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="I32">
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="66" name="Constant_11452" type="Const" version="opset1">
+			<data element_type="i32" shape="1" offset="5551660" size="4" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="67" name="Constant_11492" type="Const" version="opset1">
+			<data element_type="i32" shape="1" offset="5551656" size="4" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="68" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Gather" type="Gather" version="opset8">
+			<data batch_dims="0" />
+			<input>
+				<port id="0" precision="I32">
+					<dim>3</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>1</dim>
+				</port>
+				<port id="2" precision="I32">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="3" precision="I32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="69" name="Convert_14701" type="Convert" version="opset1">
+			<data destination_type="i32" />
+			<input>
+				<port id="0" precision="I64">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="I32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="70" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Broadcast" type="Broadcast" version="opset3">
+			<data mode="numpy" />
+			<input>
+				<port id="0" precision="I32">
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="I32">
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="71" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Concat" type="Const" version="opset1">
+			<data element_type="f32" shape="2, 1024, 256" offset="5551732" size="2097152" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="72" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Concat_1" type="Const" version="opset1">
+			<data element_type="f32" shape="2, 1024, 256" offset="7648884" size="2097152" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="73" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Concat_2" type="Const" version="opset1">
+			<data element_type="f32" shape="2, 1024" offset="9746036" size="8192" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="74" name="__module.model.SequenceModeling.0.rnn/aten::lstm/LSTMSequence" type="LSTMSequence" version="opset5">
+			<data direction="bidirectional" hidden_size="256" activations="sigmoid, tanh, tanh" activations_alpha="" activations_beta="" clip="0" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="3" precision="I32">
+					<dim>-1</dim>
+				</port>
+				<port id="4" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+				<port id="5" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+				<port id="6" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+				</port>
+			</input>
+			<output>
+				<port id="7" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="8" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="9" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="75" name="Constant_11503" type="Const" version="opset1">
+			<data element_type="i32" shape="4" offset="9754228" size="16" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>4</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="76" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Transpose_2" type="Transpose" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>4</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="77" name="Constant_11505" type="Const" version="opset1">
+			<data element_type="i32" shape="3" offset="9754244" size="12" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="78" name="__module.model.SequenceModeling.0.rnn/aten::lstm/Reshape" type="Reshape" version="opset1">
+			<data special_zero="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="151,input.43">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>512</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="79" name="self.model.SequenceModeling.0.linear.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="256, 512" offset="9754256" size="524288" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.SequenceModeling.0.linear.weight">
+					<dim>256</dim>
+					<dim>512</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="80" name="__module.model.SequenceModeling.0.linear/aten::linear/MatMul" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>512</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>256</dim>
+					<dim>512</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="81" name="Constant_14616" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 1, 256" offset="10278544" size="1024" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="82" name="__module.model.SequenceModeling.0.linear/aten::linear/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>256</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="156,input.45">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="83" name="__module.model.SequenceModeling.1.rnn/aten::lstm/Concat" type="Const" version="opset1">
+			<data element_type="f32" shape="2, 1024, 256" offset="10279568" size="2097152" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="84" name="__module.model.SequenceModeling.1.rnn/aten::lstm/Concat_1" type="Const" version="opset1">
+			<data element_type="f32" shape="2, 1024, 256" offset="12376720" size="2097152" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="85" name="__module.model.SequenceModeling.1.rnn/aten::lstm/Concat_2" type="Const" version="opset1">
+			<data element_type="f32" shape="2, 1024" offset="14473872" size="8192" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="86" name="__module.model.SequenceModeling.1.rnn/aten::lstm/LSTMSequence" type="LSTMSequence" version="opset5">
+			<data direction="bidirectional" hidden_size="256" activations="sigmoid, tanh, tanh" activations_alpha="" activations_beta="" clip="0" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="3" precision="I32">
+					<dim>-1</dim>
+				</port>
+				<port id="4" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+				<port id="5" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+					<dim>256</dim>
+				</port>
+				<port id="6" precision="FP32">
+					<dim>2</dim>
+					<dim>1024</dim>
+				</port>
+			</input>
+			<output>
+				<port id="7" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="8" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="9" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="87" name="Constant_11620" type="Const" version="opset1">
+			<data element_type="i32" shape="4" offset="9754228" size="16" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>4</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="88" name="__module.model.SequenceModeling.1.rnn/aten::lstm/Transpose_2" type="Transpose" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>4</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="89" name="Constant_11622" type="Const" version="opset1">
+			<data element_type="i32" shape="3" offset="9754244" size="12" />
+			<output>
+				<port id="0" precision="I32">
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="90" name="__module.model.SequenceModeling.1.rnn/aten::lstm/Reshape" type="Reshape" version="opset1">
+			<data special_zero="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>2</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="I32">
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="174,input.47">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>512</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="91" name="self.model.SequenceModeling.1.linear.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="256, 512" offset="14482064" size="524288" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.SequenceModeling.1.linear.weight">
+					<dim>256</dim>
+					<dim>512</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="92" name="__module.model.SequenceModeling.1.linear/aten::linear/MatMul" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>512</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>256</dim>
+					<dim>512</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="93" name="Constant_14617" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 1, 256" offset="15006352" size="1024" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="94" name="__module.model.SequenceModeling.1.linear/aten::linear/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>256</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="179,contextual_feature">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="95" name="self.model.Prediction.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="6719, 256" offset="15007376" size="6880256" />
+			<output>
+				<port id="0" precision="FP32" names="self.model.Prediction.weight">
+					<dim>6719</dim>
+					<dim>256</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="96" name="__module.model.Prediction/aten::linear/MatMul" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>256</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>6719</dim>
+					<dim>256</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>6719</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="97" name="Constant_14618" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 1, 6719" offset="21887632" size="26876" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>6719</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="98" name="__module.model.Prediction/aten::linear/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>6719</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>6719</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>6719</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="99" name="Result_11638" type="Result" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+					<dim>6719</dim>
+				</port>
+			</input>
+		</layer>
+	</layers>
+	<edges>
+		<edge from-layer="0" from-port="0" to-layer="2" to-port="0" />
+		<edge from-layer="1" from-port="0" to-layer="2" to-port="1" />
+		<edge from-layer="2" from-port="2" to-layer="4" to-port="0" />
+		<edge from-layer="3" from-port="0" to-layer="4" to-port="1" />
+		<edge from-layer="4" from-port="2" to-layer="5" to-port="0" />
+		<edge from-layer="5" from-port="1" to-layer="6" to-port="0" />
+		<edge from-layer="6" from-port="1" to-layer="8" to-port="0" />
+		<edge from-layer="7" from-port="0" to-layer="8" to-port="1" />
+		<edge from-layer="8" from-port="2" to-layer="10" to-port="0" />
+		<edge from-layer="9" from-port="0" to-layer="10" to-port="1" />
+		<edge from-layer="10" from-port="2" to-layer="11" to-port="0" />
+		<edge from-layer="11" from-port="1" to-layer="12" to-port="0" />
+		<edge from-layer="12" from-port="1" to-layer="14" to-port="0" />
+		<edge from-layer="13" from-port="0" to-layer="14" to-port="1" />
+		<edge from-layer="14" from-port="2" to-layer="16" to-port="0" />
+		<edge from-layer="15" from-port="0" to-layer="16" to-port="1" />
+		<edge from-layer="16" from-port="2" to-layer="17" to-port="0" />
+		<edge from-layer="17" from-port="1" to-layer="19" to-port="0" />
+		<edge from-layer="18" from-port="0" to-layer="19" to-port="1" />
+		<edge from-layer="19" from-port="2" to-layer="21" to-port="0" />
+		<edge from-layer="20" from-port="0" to-layer="21" to-port="1" />
+		<edge from-layer="21" from-port="2" to-layer="22" to-port="0" />
+		<edge from-layer="22" from-port="1" to-layer="23" to-port="0" />
+		<edge from-layer="23" from-port="1" to-layer="25" to-port="0" />
+		<edge from-layer="24" from-port="0" to-layer="25" to-port="1" />
+		<edge from-layer="25" from-port="2" to-layer="27" to-port="0" />
+		<edge from-layer="26" from-port="0" to-layer="27" to-port="1" />
+		<edge from-layer="27" from-port="2" to-layer="28" to-port="0" />
+		<edge from-layer="28" from-port="1" to-layer="30" to-port="0" />
+		<edge from-layer="29" from-port="0" to-layer="30" to-port="1" />
+		<edge from-layer="30" from-port="2" to-layer="32" to-port="0" />
+		<edge from-layer="31" from-port="0" to-layer="32" to-port="1" />
+		<edge from-layer="32" from-port="2" to-layer="33" to-port="0" />
+		<edge from-layer="33" from-port="1" to-layer="34" to-port="0" />
+		<edge from-layer="34" from-port="1" to-layer="36" to-port="0" />
+		<edge from-layer="35" from-port="0" to-layer="36" to-port="1" />
+		<edge from-layer="36" from-port="2" to-layer="38" to-port="0" />
+		<edge from-layer="37" from-port="0" to-layer="38" to-port="1" />
+		<edge from-layer="38" from-port="2" to-layer="39" to-port="0" />
+		<edge from-layer="39" from-port="1" to-layer="41" to-port="0" />
+		<edge from-layer="40" from-port="0" to-layer="41" to-port="1" />
+		<edge from-layer="41" from-port="2" to-layer="42" to-port="0" />
+		<edge from-layer="41" from-port="2" to-layer="49" to-port="0" />
+		<edge from-layer="42" from-port="1" to-layer="45" to-port="0" />
+		<edge from-layer="42" from-port="1" to-layer="58" to-port="0" />
+		<edge from-layer="43" from-port="0" to-layer="45" to-port="1" />
+		<edge from-layer="44" from-port="0" to-layer="45" to-port="2" />
+		<edge from-layer="45" from-port="3" to-layer="46" to-port="0" />
+		<edge from-layer="46" from-port="1" to-layer="48" to-port="0" />
+		<edge from-layer="47" from-port="0" to-layer="48" to-port="1" />
+		<edge from-layer="48" from-port="2" to-layer="49" to-port="1" />
+		<edge from-layer="49" from-port="2" to-layer="51" to-port="0" />
+		<edge from-layer="50" from-port="0" to-layer="51" to-port="1" />
+		<edge from-layer="51" from-port="2" to-layer="53" to-port="0" />
+		<edge from-layer="52" from-port="0" to-layer="53" to-port="1" />
+		<edge from-layer="53" from-port="2" to-layer="64" to-port="0" />
+		<edge from-layer="53" from-port="2" to-layer="74" to-port="0" />
+		<edge from-layer="54" from-port="0" to-layer="61" to-port="0" />
+		<edge from-layer="55" from-port="0" to-layer="60" to-port="0" />
+		<edge from-layer="56" from-port="0" to-layer="58" to-port="1" />
+		<edge from-layer="57" from-port="0" to-layer="58" to-port="2" />
+		<edge from-layer="58" from-port="3" to-layer="60" to-port="1" />
+		<edge from-layer="58" from-port="3" to-layer="69" to-port="0" />
+		<edge from-layer="59" from-port="0" to-layer="60" to-port="2" />
+		<edge from-layer="60" from-port="3" to-layer="61" to-port="1" />
+		<edge from-layer="61" from-port="2" to-layer="63" to-port="0" />
+		<edge from-layer="62" from-port="0" to-layer="63" to-port="1" />
+		<edge from-layer="63" from-port="2" to-layer="74" to-port="1" />
+		<edge from-layer="63" from-port="2" to-layer="74" to-port="2" />
+		<edge from-layer="63" from-port="2" to-layer="86" to-port="1" />
+		<edge from-layer="63" from-port="2" to-layer="86" to-port="2" />
+		<edge from-layer="64" from-port="1" to-layer="65" to-port="0" />
+		<edge from-layer="65" from-port="1" to-layer="68" to-port="0" />
+		<edge from-layer="66" from-port="0" to-layer="68" to-port="1" />
+		<edge from-layer="67" from-port="0" to-layer="68" to-port="2" />
+		<edge from-layer="68" from-port="3" to-layer="70" to-port="0" />
+		<edge from-layer="69" from-port="1" to-layer="70" to-port="1" />
+		<edge from-layer="70" from-port="2" to-layer="74" to-port="3" />
+		<edge from-layer="70" from-port="2" to-layer="86" to-port="3" />
+		<edge from-layer="71" from-port="0" to-layer="74" to-port="4" />
+		<edge from-layer="72" from-port="0" to-layer="74" to-port="5" />
+		<edge from-layer="73" from-port="0" to-layer="74" to-port="6" />
+		<edge from-layer="74" from-port="7" to-layer="76" to-port="0" />
+		<edge from-layer="75" from-port="0" to-layer="76" to-port="1" />
+		<edge from-layer="76" from-port="2" to-layer="78" to-port="0" />
+		<edge from-layer="77" from-port="0" to-layer="78" to-port="1" />
+		<edge from-layer="78" from-port="2" to-layer="80" to-port="0" />
+		<edge from-layer="79" from-port="0" to-layer="80" to-port="1" />
+		<edge from-layer="80" from-port="2" to-layer="82" to-port="0" />
+		<edge from-layer="81" from-port="0" to-layer="82" to-port="1" />
+		<edge from-layer="82" from-port="2" to-layer="86" to-port="0" />
+		<edge from-layer="83" from-port="0" to-layer="86" to-port="4" />
+		<edge from-layer="84" from-port="0" to-layer="86" to-port="5" />
+		<edge from-layer="85" from-port="0" to-layer="86" to-port="6" />
+		<edge from-layer="86" from-port="7" to-layer="88" to-port="0" />
+		<edge from-layer="87" from-port="0" to-layer="88" to-port="1" />
+		<edge from-layer="88" from-port="2" to-layer="90" to-port="0" />
+		<edge from-layer="89" from-port="0" to-layer="90" to-port="1" />
+		<edge from-layer="90" from-port="2" to-layer="92" to-port="0" />
+		<edge from-layer="91" from-port="0" to-layer="92" to-port="1" />
+		<edge from-layer="92" from-port="2" to-layer="94" to-port="0" />
+		<edge from-layer="93" from-port="0" to-layer="94" to-port="1" />
+		<edge from-layer="94" from-port="2" to-layer="96" to-port="0" />
+		<edge from-layer="95" from-port="0" to-layer="96" to-port="1" />
+		<edge from-layer="96" from-port="2" to-layer="98" to-port="0" />
+		<edge from-layer="97" from-port="0" to-layer="98" to-port="1" />
+		<edge from-layer="98" from-port="2" to-layer="99" to-port="0" />
+	</edges>
+	<rt_info>
+		<info name="OpenVINO Runtime" value="2026.4.1-22982-e213a147257-releases/2026/4" />
+		<Runtime_version value="2026.4.1-22982-e213a147257-releases/2026/4" />
+		<conversion_parameters>
+			<framework value="pytorch" />
+			<is_python_object value="True" />
+		</conversion_parameters>
+	</rt_info>
+</net>

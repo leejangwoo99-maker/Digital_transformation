@@ -1,0 +1,36 @@
+description: Ultralytics YOLOv8n-obb model trained on C:\Users\user\PycharmProjects\PythonProject\vision_inspection_project\dataset\algorithm_datasets\Proto_23fps_algorith\data.yaml
+author: Ultralytics
+date: '2026-11-12T10:02:36.940832'
+version: 8.4.53
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: obb
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: ok
+  1: defect
+  2: scratch
+  3: dent
+  4: breakage
+  5: variation
+  6: foreign_object
+  7: auto_exclude
+  8: anchor_1
+  9: anchor_2
+  10: roi
+  11: exclude
+  12: except
+args:
+  data: null
+  batch: 1
+  fraction: 1.0
+  half: false
+  int8: false
+  dynamic: true
+  nms: false
+channels: 3
+end2end: false

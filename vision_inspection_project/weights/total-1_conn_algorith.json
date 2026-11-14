@@ -1,0 +1,14 @@
+{
+  "conn_crop": true,
+  "conn_pin_point": true,
+  "image_size": 640,
+  "data": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\dataset\\algorithm_datasets\\total-1_conn_algorith_20261005_130942_496754\\data.yaml",
+  "run_dir": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\runs\\detect\\runs\\train\\total-1_conn_algorith",
+  "metrics": {
+    "metrics/precision(B)": 0.7537265158909532,
+    "metrics/recall(B)": 0.5208333333333334,
+    "metrics/mAP50(B)": 0.5485949359354072,
+    "metrics/mAP50-95(B)": 0.19518161033757725,
+    "fitness": 0.19518161033757725
+  }
+}

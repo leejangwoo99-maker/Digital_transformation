@@ -1,0 +1,16 @@
+{
+  "conn_crop": false,
+  "conn_reflection_augmentation": false,
+  "conn_pin_point": false,
+  "image_size": 640,
+  "task": "obb",
+  "data": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\dataset\\algorithm_datasets\\Proto_23fps_algorith\\data.yaml",
+  "run_dir": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\runs\\obb\\runs\\train\\Proto_23fps_algorith-5",
+  "metrics": {
+    "metrics/precision(B)": 0.6803431846516557,
+    "metrics/recall(B)": 0.6503313466006666,
+    "metrics/mAP50(B)": 0.6251154388944281,
+    "metrics/mAP50-95(B)": 0.44677867910925606,
+    "fitness": 0.44677867910925606
+  }
+}

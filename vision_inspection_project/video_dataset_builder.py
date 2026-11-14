@@ -410,6 +410,10 @@ def delete_frame_group(image_paths: list[Path], label_dir: Path) -> int:
         if label_path.exists():
             label_path.unlink()
             deleted_count += 1
+        rotation_path = label_path.with_suffix(".rotation.json")
+        if rotation_path.exists():
+            rotation_path.unlink()
+            deleted_count += 1
     return deleted_count
 
 

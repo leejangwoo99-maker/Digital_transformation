@@ -1,0 +1,14 @@
+{
+  "conn_crop": false,
+  "conn_pin_point": false,
+  "image_size": 640,
+  "data": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\dataset\\algorithm_datasets\\20261005_140951_3fps_algorith\\data.yaml",
+  "run_dir": "C:\\Users\\user\\PycharmProjects\\PythonProject\\vision_inspection_project\\runs\\detect\\runs\\train\\20261005_140951_3fps_algorith",
+  "metrics": {
+    "metrics/precision(B)": 0.7723927719694388,
+    "metrics/recall(B)": 0.7800882305350384,
+    "metrics/mAP50(B)": 0.8367740461281836,
+    "metrics/mAP50-95(B)": 0.6044178466150845,
+    "fitness": 0.6044178466150845
+  }
+}
