@@ -34,8 +34,8 @@
 
 1. It can inspect the product's defects what saeved in real time.
 > 저장한 제품의 결함을 실시간으로 검출할 수 있습니다.
-2. When use real time inspection, It uses the camera of the phone through IP Webcam(application)
-> 실시간 검사를 사용 시 카메라는 IP Webcam이라는 어플을 통해 휴대폰의 카메라를 사용합니다.
+2. When use real time inspection and record, It uses the camera of the phone through C type wires(The user needs to change the mode of the phone)
+> 실시간 검사 또는 녹화 시 USB C TYPE으로 유선 연결하여 휴대폰 카메라를 이용할 수 있습니다.(개발자 모드 및 보안 영역 해제 필요) 
 3. Please refer vision_inspection_project folder includeing maunal and source code, excute the main.py.
 > vision_inspection_project 폴더에 메뉴얼과 소스코드를 참고하고 main.py를 실행하세요.
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
