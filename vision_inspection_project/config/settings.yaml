@@ -21,6 +21,7 @@ extract:
 
 model:
   weights: weights/best.pt
+  appearance_backend: openvino
   confidence: 0.10
   iou: 0.45
   image_size: 640
@@ -41,6 +42,9 @@ judge:
     - ng
     - scratch
     - dent
+    - breakage
+    - variation
+    - foreign_object
   min_confidence: 0.10
   no_detection_judge: OK
 
